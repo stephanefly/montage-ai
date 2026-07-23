@@ -1,0 +1,10 @@
+[project]
+name = "msb-video-ai-after-effects"
+version = "3.4.0"
+description = "Analyse locale de rushs événementiels et génération de projets After Effects"
+requires-python = ">=3.10"
+authors = [{name = "Stéphane FAURE"}]
+license = {text = "MIT"}
+
+[tool.ruff]
+line-length = 100
