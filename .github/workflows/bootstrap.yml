@@ -1,0 +1,34 @@
+name: Complete repository upload
+
+on:
+  push:
+    paths:
+      - project_bundle.b64
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack validated V3.4 project
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode project_bundle.b64 > project_bundle.zip
+          unzip -q project_bundle.zip
+          cp -a msb-video-ai-after-effects/. .
+          rm -rf msb-video-ai-after-effects project_bundle.zip project_bundle.b64
+          rm -f .github/workflows/bootstrap.yml
+      - name: Commit complete repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish complete V3.4 project"
+          git push origin main
