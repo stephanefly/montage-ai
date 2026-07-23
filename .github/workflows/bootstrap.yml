@@ -1,34 +1,62 @@
-name: Complete repository upload
+name: Publish simple project
 
 on:
   push:
     paths:
-      - project_bundle.b64
-  workflow_dispatch:
+      - simple_bundle.ready
 
 permissions:
   contents: write
 
 jobs:
-  unpack:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unpack validated V3.4 project
+      - name: Replace repository with the simple version
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode project_bundle.b64 > project_bundle.zip
-          unzip -q project_bundle.zip
-          cp -a msb-video-ai-after-effects/. .
-          rm -rf msb-video-ai-after-effects project_bundle.zip project_bundle.b64
-          rm -f .github/workflows/bootstrap.yml
-      - name: Commit complete repository
+          python - <<'PY'
+          import base64
+          import shutil
+          import zipfile
+          from pathlib import Path
+
+          root = Path.cwd()
+          parts = sorted((root / "bundle_parts").glob("part_*"))
+          if not parts:
+              raise SystemExit("Aucune partie du projet trouvée")
+
+          encoded = "".join(path.read_text(encoding="ascii") for path in parts)
+          archive = root / "simple_project.zip"
+          archive.write_bytes(base64.b64decode(encoded, validate=True))
+
+          extracted = root / "_simple_project"
+          if extracted.exists():
+              shutil.rmtree(extracted)
+          extracted.mkdir()
+          with zipfile.ZipFile(archive) as zip_file:
+              zip_file.extractall(extracted)
+
+          for path in list(root.iterdir()):
+              if path.name in {".git", "_simple_project"}:
+                  continue
+              if path.is_dir():
+                  shutil.rmtree(path)
+              else:
+                  path.unlink()
+
+          for path in list(extracted.iterdir()):
+              shutil.move(str(path), str(root / path.name))
+          extracted.rmdir()
+          PY
+      - name: Commit the simple project
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Publish complete V3.4 project"
+          git commit -m "Simplify project to one-click workflow"
           git push origin main
