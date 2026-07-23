@@ -3,7 +3,7 @@ name: Publish simple Python project
 on:
   push:
     paths:
-      - simple_bundle.b64
+      - simple_bundle.ready
   workflow_dispatch:
 
 permissions:
@@ -18,13 +18,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/montage-ai-simple
-          base64 --decode simple_bundle.b64 > /tmp/montage-ai-simple.zip
-          unzip -q /tmp/montage-ai-simple.zip -d /tmp/montage-ai-simple
+          python - <<'PY'
+          import base64
+          import shutil
+          import zipfile
+          from pathlib import Path
 
-          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -a /tmp/montage-ai-simple/. .
+          root = Path.cwd()
+          parts = sorted((root / "bundle_parts").glob("part_*"))
+          if not parts:
+              raise SystemExit("Aucune partie du projet trouvée")
 
+          encoded = "".join(path.read_text(encoding="ascii") for path in parts)
+          archive = Path("/tmp/montage-ai-simple.zip")
+          archive.write_bytes(base64.b64decode(encoded, validate=True))
+
+          extracted = Path("/tmp/montage-ai-simple")
+          if extracted.exists():
+              shutil.rmtree(extracted)
+          extracted.mkdir()
+          with zipfile.ZipFile(archive) as zip_file:
+              zip_file.extractall(extracted)
+
+          for path in list(root.iterdir()):
+              if path.name == ".git":
+                  continue
+              if path.is_dir():
+                  shutil.rmtree(path)
+              else:
+                  path.unlink()
+
+          for path in extracted.iterdir():
+              shutil.move(str(path), str(root / path.name))
+          PY
+      - name: Commit simple Python project
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
