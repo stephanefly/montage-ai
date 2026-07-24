@@ -45,7 +45,7 @@ EXCLUDED_FOLDERS = {
 
 MACHINES = ["Photobooth", "VogueBooth", "360Booth", "MiroirBooth", "Aucune"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 
 
 @dataclass
@@ -275,7 +275,9 @@ class Database:
                 height INTEGER NOT NULL,
                 fps REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'new',
-                error TEXT NOT NULL DEFAULT ''
+                error TEXT NOT NULL DEFAULT '',
+                analysis_version INTEGER NOT NULL DEFAULT 0,
+                analysis_model TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS moments (
@@ -311,6 +313,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_moments_machine_score
             ON moments(machine, score DESC);
         """)
+        video_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(videos)")
+        }
+        if "analysis_version" not in video_columns:
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN analysis_version INTEGER NOT NULL DEFAULT 0"
+            )
+        if "analysis_model" not in video_columns:
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN analysis_model TEXT NOT NULL DEFAULT ''"
+            )
         self.connection.commit()
 
     def get_signature(self, video_path: str) -> sqlite3.Row | None:
@@ -420,6 +434,32 @@ class Database:
         row = self.connection.execute("SELECT 1 FROM videos LIMIT 1").fetchone()
         return row is not None
 
+    def invalidate_outdated_analyses(self, model: str) -> int:
+        condition = """
+            status='done' AND (analysis_version != ? OR analysis_model != ?)
+        """
+        parameters = (ANALYSIS_VERSION, model)
+        rows = self.connection.execute(
+            f"SELECT path FROM videos WHERE {condition}", parameters
+        ).fetchall()
+        if not rows:
+            return 0
+        paths = [row["path"] for row in rows]
+        self.connection.executemany(
+            "DELETE FROM moments WHERE video_path=?",
+            ((path,) for path in paths),
+        )
+        self.connection.execute(
+            f"""
+            UPDATE videos
+            SET status='new', error='', analysis_version=0, analysis_model=''
+            WHERE {condition}
+            """,
+            parameters,
+        )
+        self.connection.commit()
+        return len(paths)
+
     def next_videos(
         self,
         limit: int,
@@ -442,7 +482,12 @@ class Database:
 
         return list(self.connection.execute(query, parameters))
 
-    def save_moments(self, video_path: str, moments: list[dict]) -> None:
+    def save_moments(
+        self,
+        video_path: str,
+        moments: list[dict],
+        model: str,
+    ) -> None:
         self.connection.execute(
             "DELETE FROM moments WHERE video_path = ?",
             (video_path,)
@@ -458,10 +503,11 @@ class Database:
                 item["score"], item["machine"], item["smile"], item["reaction"],
                 item["energy"], item["quality"], item["description"]
             ))
-        self.connection.execute(
-            "UPDATE videos SET status='done', error='' WHERE path=?",
-            (video_path,)
-        )
+        self.connection.execute("""
+            UPDATE videos
+            SET status='done', error='', analysis_version=?, analysis_model=?
+            WHERE path=?
+        """, (ANALYSIS_VERSION, model, video_path))
         self.connection.commit()
 
     def mark_error(self, video_path: str, message: str) -> None:
@@ -1177,6 +1223,13 @@ def main() -> int:
     database = Database(database_path)
 
     try:
+        invalidated = database.invalidate_outdated_analyses(args.model)
+        if invalidated:
+            print(
+                f"{invalidated} ancienne(s) analyse(s) invalidée(s) : "
+                "elles seront recalculées avec le pipeline actuel."
+            )
+
         if args.export_only:
             export_results(database, output, args)
             print_database_status(database)
@@ -1255,7 +1308,7 @@ def main() -> int:
                     work,
                     references,
                 )
-                database.save_moments(video_path, moments)
+                database.save_moments(video_path, moments, args.model)
                 print(f"  {len(moments)} moment(s) retenu(s)")
             except KeyboardInterrupt:
                 print("\nAnalyse interrompue. Les vidéos déjà terminées restent enregistrées.")

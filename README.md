@@ -13,6 +13,7 @@ Les vidéos originales ne sont jamais modifiées, déplacées ou supprimées.
 - analyse des sourires, réactions, énergie et qualité ;
 - reconnaissance indépendante Photobooth, VogueBooth, 360Booth et MiroirBooth ;
 - cache SQLite des analyses pour accélérer les relances identiques ;
+- invalidation automatique des anciens résultats après un changement de modèle ou de pipeline ;
 - classement automatique par score ;
 - génération d'un Top 10 Photobooth ;
 - export CSV avec timecodes ;
