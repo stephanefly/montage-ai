@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Montage AI — version simple.
+"""Montage AI — analyse et sélection de rushs événementiels.
 
-Un seul script pour :
-1. parcourir les vidéos du NAS ;
-2. détecter quelques passages intéressants avec FFmpeg ;
-3. analyser ces passages avec Ollama Vision ;
-4. enregistrer la progression dans SQLite ;
-5. générer un CSV et un script JSX pour After Effects.
+Le programme peut :
+1. indexer les vidéos du NAS dans SQLite ;
+2. reprendre une base existante sans rescanner le NAS ;
+3. détecter des passages intéressants avec FFmpeg ;
+4. analyser les images avec Ollama Vision ;
+5. générer les CSV de sélection et un script After Effects.
 
 Aucune bibliothèque Python externe n'est nécessaire.
 """
@@ -25,6 +25,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ EXCLUDED_FOLDERS = {
 }
 
 MACHINES = ["Photobooth", "VogueBooth", "360Booth", "MiroirBooth", "Aucune"]
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 @dataclass
@@ -56,19 +58,107 @@ class VideoInfo:
     mtime_ns: int
 
 
+@dataclass
+class ReferenceImage:
+    machine: str
+    path: Path
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyse les vidéos et prépare After Effects.")
-    parser.add_argument("source", nargs="?", default=r"P:\Montage-EVENT\ALL_MONTAGE")
-    parser.add_argument("--output", default="resultats")
-    parser.add_argument("--max-videos", type=int, default=50)
-    parser.add_argument("--model", default="gemma3")
-    parser.add_argument("--ollama-url", default="http://localhost:11434")
-    parser.add_argument("--event-name", default="MySelfieBooth")
-    parser.add_argument("--references", default="machine_references")
-    parser.add_argument("--candidates", type=int, default=8)
-    parser.add_argument("--top-moments", type=int, default=3)
-    parser.add_argument("--min-score", type=int, default=58)
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Indexe, analyse et classe les vidéos pour After Effects."
+    )
+    parser.add_argument(
+        "source",
+        nargs="?",
+        default=r"P:\Montage-EVENT\ALL_MONTAGE",
+        help="Dossier contenant les vidéos."
+    )
+    parser.add_argument("--output", default="resultats", help="Dossier de sortie.")
+
+    index_group = parser.add_argument_group("Indexation")
+    index_group.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="Utilise la base SQLite existante sans rescanner le NAS."
+    )
+    index_group.add_argument(
+        "--index-only",
+        action="store_true",
+        help="Indexe les vidéos puis s'arrête avant l'analyse."
+    )
+    index_group.add_argument(
+        "--max-index",
+        type=int,
+        default=0,
+        help="Nombre maximal de fichiers à parcourir pendant l'indexation. 0 = tous."
+    )
+
+    analysis_group = parser.add_argument_group("Analyse")
+    analysis_group.add_argument(
+        "--max-videos",
+        type=int,
+        default=50,
+        help="Nombre maximal de vidéos à analyser. 0 = toutes les vidéos en attente."
+    )
+    analysis_group.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Regénère les CSV et le JSX sans indexer ni analyser."
+    )
+    analysis_group.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="Réessaie aussi les vidéos précédemment en erreur."
+    )
+    analysis_group.add_argument(
+        "--reanalyze",
+        action="store_true",
+        help="Réanalyse des vidéos déjà terminées."
+    )
+    analysis_group.add_argument("--candidates", type=int, default=8)
+    analysis_group.add_argument("--top-moments", type=int, default=3)
+    analysis_group.add_argument("--min-score", type=int, default=58)
+
+    ai_group = parser.add_argument_group("Ollama")
+    ai_group.add_argument("--model", default="gemma3")
+    ai_group.add_argument("--ollama-url", default="http://localhost:11434")
+    ai_group.add_argument("--references", default="machine_references")
+
+    export_group = parser.add_argument_group("Exports")
+    export_group.add_argument("--event-name", default="MySelfieBooth")
+    export_group.add_argument(
+        "--top-machine",
+        choices=MACHINES[:-1],
+        default="Photobooth",
+        help="Machine utilisée pour le fichier Top."
+    )
+    export_group.add_argument(
+        "--top-limit",
+        type=int,
+        default=10,
+        help="Nombre de moments dans le fichier Top."
+    )
+    export_group.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="Conserve les planches d'images temporaires."
+    )
+
+    args = parser.parse_args()
+
+    if args.max_index < 0 or args.max_videos < 0:
+        parser.error("--max-index et --max-videos doivent être positifs ou égaux à 0.")
+    if args.candidates < 1:
+        parser.error("--candidates doit être supérieur ou égal à 1.")
+    if args.top_moments < 1:
+        parser.error("--top-moments doit être supérieur ou égal à 1.")
+    if not 0 <= args.min_score <= 100:
+        parser.error("--min-score doit être compris entre 0 et 100.")
+    if args.top_limit < 1:
+        parser.error("--top-limit doit être supérieur ou égal à 1.")
+
+    return args
 
 
 def require_program(name: str) -> str:
@@ -99,6 +189,10 @@ def safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def clamp_score(value: object) -> int:
+    return max(0, min(100, int(round(safe_float(value)))))
+
+
 def parse_rate(value: str) -> float:
     if not value or value in {"0/0", "N/A"}:
         return 0.0
@@ -115,6 +209,11 @@ def timecode(seconds: float) -> str:
     minutes, rest = divmod(rest, 60_000)
     secs, ms = divmod(rest, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip())
+    return cleaned.strip("_") or "selection"
 
 
 def discover_videos(root: Path) -> Iterable[Path]:
@@ -163,6 +262,9 @@ class Database:
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+
             CREATE TABLE IF NOT EXISTS videos (
                 path TEXT PRIMARY KEY,
                 size INTEGER NOT NULL,
@@ -174,6 +276,7 @@ class Database:
                 status TEXT NOT NULL DEFAULT 'new',
                 error TEXT NOT NULL DEFAULT ''
             );
+
             CREATE TABLE IF NOT EXISTS moments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 video_path TEXT NOT NULL,
@@ -187,19 +290,39 @@ class Database:
                 energy INTEGER NOT NULL,
                 quality INTEGER NOT NULL,
                 description TEXT NOT NULL,
-                UNIQUE(video_path, timestamp)
+                UNIQUE(video_path, timestamp),
+                FOREIGN KEY(video_path) REFERENCES videos(path) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_videos_status
+            ON videos(status, mtime_ns DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_moments_machine_score
+            ON moments(machine, score DESC);
         """)
         self.connection.commit()
 
-    def upsert_video(self, video: VideoInfo) -> None:
-        previous = self.connection.execute(
-            "SELECT size, mtime_ns FROM videos WHERE path = ?", (str(video.path),)
+    def get_signature(self, video_path: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT size, mtime_ns FROM videos WHERE path = ?",
+            (video_path,)
         ).fetchone()
-        changed = previous and (
-            previous["size"] != video.size or previous["mtime_ns"] != video.mtime_ns
-        )
-        status = "new" if changed or previous is None else None
+
+    def upsert_video(self, video: VideoInfo) -> str:
+        video_path = str(video.path)
+        previous = self.connection.execute(
+            "SELECT size, mtime_ns FROM videos WHERE path = ?",
+            (video_path,)
+        ).fetchone()
+
+        state = "new"
+        if previous is not None:
+            changed = (
+                previous["size"] != video.size
+                or previous["mtime_ns"] != video.mtime_ns
+            )
+            state = "updated" if changed else "unchanged"
+
         self.connection.execute("""
             INSERT INTO videos(path, size, mtime_ns, duration, width, height, fps, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'new')
@@ -210,25 +333,67 @@ class Database:
                 width=excluded.width,
                 height=excluded.height,
                 fps=excluded.fps,
-                status=CASE WHEN videos.size != excluded.size OR videos.mtime_ns != excluded.mtime_ns
-                            THEN 'new' ELSE videos.status END
+                status=CASE
+                    WHEN videos.size != excluded.size
+                      OR videos.mtime_ns != excluded.mtime_ns
+                    THEN 'new'
+                    ELSE videos.status
+                END,
+                error=CASE
+                    WHEN videos.size != excluded.size
+                      OR videos.mtime_ns != excluded.mtime_ns
+                    THEN ''
+                    ELSE videos.error
+                END
         """, (
-            str(video.path), video.size, video.mtime_ns, video.duration,
+            video_path, video.size, video.mtime_ns, video.duration,
             video.width, video.height, video.fps
         ))
-        if status == "new" and previous:
-            self.connection.execute("DELETE FROM moments WHERE video_path = ?", (str(video.path),))
+
+        if state == "updated":
+            self.connection.execute(
+                "DELETE FROM moments WHERE video_path = ?",
+                (video_path,)
+            )
+        return state
+
+    def commit(self) -> None:
         self.connection.commit()
 
-    def next_videos(self, limit: int) -> list[sqlite3.Row]:
-        query = "SELECT * FROM videos WHERE status != 'done' ORDER BY mtime_ns DESC"
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def has_videos(self) -> bool:
+        row = self.connection.execute("SELECT 1 FROM videos LIMIT 1").fetchone()
+        return row is not None
+
+    def next_videos(
+        self,
+        limit: int,
+        retry_errors: bool = False,
+        reanalyze: bool = False,
+    ) -> list[sqlite3.Row]:
+        if reanalyze:
+            query = "SELECT * FROM videos ORDER BY mtime_ns DESC"
+            parameters: tuple[object, ...] = ()
+        elif retry_errors:
+            query = "SELECT * FROM videos WHERE status IN ('new', 'error') ORDER BY mtime_ns DESC"
+            parameters = ()
+        else:
+            query = "SELECT * FROM videos WHERE status = 'new' ORDER BY mtime_ns DESC"
+            parameters = ()
+
         if limit > 0:
             query += " LIMIT ?"
-            return list(self.connection.execute(query, (limit,)))
-        return list(self.connection.execute(query))
+            parameters = (*parameters, limit)
+
+        return list(self.connection.execute(query, parameters))
 
     def save_moments(self, video_path: str, moments: list[dict]) -> None:
-        self.connection.execute("DELETE FROM moments WHERE video_path = ?", (video_path,))
+        self.connection.execute(
+            "DELETE FROM moments WHERE video_path = ?",
+            (video_path,)
+        )
         for item in moments:
             self.connection.execute("""
                 INSERT OR REPLACE INTO moments(
@@ -241,7 +406,8 @@ class Database:
                 item["energy"], item["quality"], item["description"]
             ))
         self.connection.execute(
-            "UPDATE videos SET status='done', error='' WHERE path=?", (video_path,)
+            "UPDATE videos SET status='done', error='' WHERE path=?",
+            (video_path,)
         )
         self.connection.commit()
 
@@ -252,23 +418,116 @@ class Database:
         )
         self.connection.commit()
 
-    def all_moments(self) -> list[sqlite3.Row]:
-        return list(self.connection.execute("""
-            SELECT moments.*, videos.width, videos.height
-            FROM moments JOIN videos ON videos.path = moments.video_path
-            ORDER BY score DESC, video_path, timestamp
-        """))
+    def all_moments(
+        self,
+        machine: str | None = None,
+        limit: int = 0,
+    ) -> list[sqlite3.Row]:
+        query = """
+            SELECT moments.*, videos.width, videos.height, videos.duration
+            FROM moments
+            JOIN videos ON videos.path = moments.video_path
+        """
+        parameters: list[object] = []
+
+        if machine:
+            query += " WHERE moments.machine = ?"
+            parameters.append(machine)
+
+        query += " ORDER BY moments.score DESC, moments.video_path, moments.timestamp"
+
+        if limit > 0:
+            query += " LIMIT ?"
+            parameters.append(limit)
+
+        return list(self.connection.execute(query, parameters))
+
+    def status_counts(self) -> dict[str, int]:
+        counts = {"new": 0, "done": 0, "error": 0}
+        for row in self.connection.execute(
+            "SELECT status, COUNT(*) AS total FROM videos GROUP BY status"
+        ):
+            counts[str(row["status"])] = int(row["total"])
+        return counts
 
     def close(self) -> None:
         self.connection.close()
 
 
-def detect_scene_times(ffmpeg: str, video: Path, duration: float, maximum: int) -> list[float]:
+def index_videos(
+    database: Database,
+    ffprobe: str,
+    source: Path,
+    maximum: int,
+) -> dict[str, int]:
+    counters = {
+        "discovered": 0,
+        "new": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "invalid": 0,
+    }
+
+    print(f"Indexation : {source}")
+    print("Ctrl+C permet d'arrêter proprement. La progression déjà enregistrée sera conservée.")
+
+    try:
+        for path in discover_videos(source):
+            if maximum > 0 and counters["discovered"] >= maximum:
+                break
+
+            counters["discovered"] += 1
+
+            try:
+                stat = path.stat()
+            except OSError:
+                counters["invalid"] += 1
+                continue
+
+            previous = database.get_signature(str(path))
+            if (
+                previous is not None
+                and previous["size"] == stat.st_size
+                and previous["mtime_ns"] == stat.st_mtime_ns
+            ):
+                counters["unchanged"] += 1
+            else:
+                info = probe_video(ffprobe, path)
+                if info is None or info.duration < 2:
+                    counters["invalid"] += 1
+                else:
+                    state = database.upsert_video(info)
+                    counters[state] += 1
+
+            if counters["discovered"] % 25 == 0:
+                database.commit()
+                print(
+                    f"  {counters['discovered']} parcourues | "
+                    f"{counters['new']} nouvelles | "
+                    f"{counters['updated']} modifiées | "
+                    f"{counters['unchanged']} déjà connues"
+                )
+
+        database.commit()
+        return counters
+
+    except KeyboardInterrupt:
+        database.commit()
+        print("\nIndexation interrompue proprement. La progression SQLite est conservée.")
+        raise
+
+
+def detect_scene_times(
+    ffmpeg: str,
+    video: Path,
+    duration: float,
+    maximum: int,
+) -> list[float]:
     result = run([
         ffmpeg, "-hide_banner", "-loglevel", "info", "-i", str(video),
-        "-vf", "scale=256:-2,select='gt(scene,0.32)',showinfo",
+        "-vf", "fps=2,scale=256:-2,select='gt(scene,0.28)',showinfo",
         "-an", "-f", "null", "-"
-    ], timeout=max(90, int(duration * 1.5)))
+    ], timeout=max(90, int(duration * 0.75)))
 
     values: list[float] = []
     if result:
@@ -277,47 +536,101 @@ def detect_scene_times(ffmpeg: str, video: Path, duration: float, maximum: int) 
             if 0.5 < value < duration - 0.5:
                 values.append(value)
 
-    if len(values) < 3:
-        count = min(maximum, max(3, int(duration // 12) + 1))
-        values.extend(duration * (index + 1) / (count + 1) for index in range(count))
+    if len(values) < min(3, maximum):
+        fallback_count = min(maximum, max(3, int(duration // 12) + 1))
+        values.extend(
+            duration * (index + 1) / (fallback_count + 1)
+            for index in range(fallback_count)
+        )
 
     unique: list[float] = []
     for value in sorted(values):
         if all(abs(value - existing) >= 3.0 for existing in unique):
             unique.append(round(value, 3))
-    return unique[:maximum]
+        if len(unique) >= maximum:
+            break
+    return unique
 
 
-def extract_contact_sheet(ffmpeg: str, video: Path, timestamp: float, duration: float, destination: Path) -> bool:
+def extract_contact_sheet(
+    ffmpeg: str,
+    video: Path,
+    timestamp: float,
+    duration: float,
+    destination: Path,
+) -> bool:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    times = [max(0.05, min(duration - 0.05, timestamp + offset)) for offset in (-0.8, 0.0, 0.8)]
-    filters = []
-    inputs = []
+    times = [
+        max(0.05, min(duration - 0.05, timestamp + offset))
+        for offset in (-0.8, 0.0, 0.8)
+    ]
+
+    inputs: list[str] = []
+    filters: list[str] = []
     for index, value in enumerate(times):
         inputs.extend(["-ss", f"{value:.3f}", "-i", str(video)])
-        filters.append(f"[{index}:v]scale=420:-2,fps=1[img{index}]")
+        filters.append(f"[{index}:v]scale=420:-2[img{index}]")
+
     filter_complex = ";".join(filters) + ";[img0][img1][img2]hstack=inputs=3[out]"
     result = run([
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *inputs,
-        "-filter_complex", filter_complex, "-map", "[out]", "-frames:v", "1", str(destination)
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-frames:v", "1", str(destination)
     ], timeout=90)
+
     return bool(result and result.returncode == 0 and destination.exists())
 
 
-def reference_images(folder: Path) -> list[Path]:
-    result: list[Path] = []
+def reference_images(folder: Path) -> list[ReferenceImage]:
+    references: list[ReferenceImage] = []
+
     for machine in MACHINES[:-1]:
         machine_folder = folder / machine
         if not machine_folder.exists():
             continue
-        image = next((p for p in machine_folder.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+
+        image = next(
+            (
+                path for path in sorted(machine_folder.iterdir())
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            ),
+            None,
+        )
         if image:
-            result.append(image)
-    return result
+            references.append(ReferenceImage(machine=machine, path=image))
+
+    return references
 
 
 def image_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def check_ollama(url: str, model: str) -> None:
+    tags_url = f"{url.rstrip('/')}/api/tags"
+    try:
+        with urllib.request.urlopen(tags_url, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            "ERREUR : Ollama ne répond pas. Lance Ollama puis réessaie.\n"
+            f"Détail : {exc}"
+        ) from exc
+
+    installed_names = {
+        str(item.get("name", ""))
+        for item in payload.get("models", [])
+        if isinstance(item, dict)
+    }
+    model_is_present = any(
+        name == model or name.startswith(f"{model}:")
+        for name in installed_names
+    )
+    if not model_is_present:
+        raise SystemExit(
+            f"ERREUR : le modèle Ollama '{model}' n'est pas installé.\n"
+            f"Commande : ollama pull {model}"
+        )
 
 
 def ollama_request(url: str, payload: dict, timeout: int = 180) -> dict:
@@ -334,16 +647,64 @@ def ollama_request(url: str, payload: dict, timeout: int = 180) -> dict:
         raise RuntimeError(f"Ollama ne répond pas correctement : {exc}") from exc
 
 
-def analyze_sheet(args: argparse.Namespace, sheet: Path, refs: list[Path]) -> dict:
-    prompt = """
-Analyse cette planche de trois images successives d'une vidéo événementielle.
-Donne une note globale et repère les sourires, réactions, énergie, qualité visuelle
-et la machine visible : Photobooth, VogueBooth, 360Booth, MiroirBooth ou Aucune.
-Les éventuelles images suivantes sont des références des vraies machines.
-Réponds uniquement en JSON avec les clés : score, machine, smile, reaction,
-energy, quality, duration, description. Toutes les notes sont de 0 à 100.
+def normalize_machine(value: object) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "photobooth": "Photobooth",
+        "photo booth": "Photobooth",
+        "borne photo": "Photobooth",
+        "voguebooth": "VogueBooth",
+        "vogue booth": "VogueBooth",
+        "360booth": "360Booth",
+        "360 booth": "360Booth",
+        "miroirbooth": "MiroirBooth",
+        "miroir booth": "MiroirBooth",
+        "miroir": "MiroirBooth",
+        "aucune": "Aucune",
+        "none": "Aucune",
+    }
+    return aliases.get(text, "Aucune")
+
+
+def analyze_sheet(
+    args: argparse.Namespace,
+    sheet: Path,
+    references: list[ReferenceImage],
+) -> dict:
+    reference_description = ", ".join(
+        f"image {index + 2} = {reference.machine}"
+        for index, reference in enumerate(references[:4])
+    )
+    if not reference_description:
+        reference_description = "aucune image de référence fournie"
+
+    prompt = f"""
+Tu analyses une vidéo événementielle MySelfieBooth.
+
+L'image 1 est une planche de trois instants successifs du même passage.
+Références éventuelles : {reference_description}.
+
+Évalue séparément :
+- smile : sourires et expressions positives ;
+- reaction : réaction forte, surprise, rire ou interaction ;
+- energy : mouvement, dynamisme et ambiance ;
+- quality : netteté, cadrage, lumière et visibilité des personnes.
+
+Identifie la machine principale visible parmi exactement :
+Photobooth, VogueBooth, 360Booth, MiroirBooth ou Aucune.
+Ne confonds pas une simple décoration avec une machine.
+Propose une durée d'extrait entre 2 et 10 secondes.
+
+Réponds uniquement en JSON valide avec les clés :
+score, machine, smile, reaction, energy, quality, duration, description.
+Toutes les notes sont des nombres de 0 à 100.
+La description doit être courte et factuelle.
 """.strip()
-    images = [image_base64(sheet)] + [image_base64(path) for path in refs[:4]]
+
+    images = [image_base64(sheet)] + [
+        image_base64(reference.path)
+        for reference in references[:4]
+    ]
     payload = {
         "model": args.model,
         "prompt": prompt,
@@ -352,19 +713,36 @@ energy, quality, duration, description. Toutes les notes sont de 0 à 100.
         "format": "json",
         "options": {"temperature": 0.1},
     }
-    response = ollama_request(f"{args.ollama_url.rstrip('/')}/api/generate", payload)
+
+    response = ollama_request(
+        f"{args.ollama_url.rstrip('/')}/api/generate",
+        payload,
+    )
     raw = response.get("response", "{}")
     data = raw if isinstance(raw, dict) else json.loads(raw)
-    machine = str(data.get("machine", "Aucune"))
-    if machine not in MACHINES:
-        machine = "Aucune"
+
+    smile = clamp_score(data.get("smile"))
+    reaction = clamp_score(data.get("reaction"))
+    energy = clamp_score(data.get("energy"))
+    quality = clamp_score(data.get("quality"))
+    ai_score = clamp_score(data.get("score"))
+    machine = normalize_machine(data.get("machine"))
+
+    calculated_score = round(
+        ai_score * 0.15
+        + smile * 0.25
+        + reaction * 0.25
+        + energy * 0.15
+        + quality * 0.20
+    )
+
     return {
-        "score": max(0, min(100, int(safe_float(data.get("score"))))),
+        "score": clamp_score(calculated_score),
         "machine": machine,
-        "smile": max(0, min(100, int(safe_float(data.get("smile"))))),
-        "reaction": max(0, min(100, int(safe_float(data.get("reaction"))))),
-        "energy": max(0, min(100, int(safe_float(data.get("energy"))))),
-        "quality": max(0, min(100, int(safe_float(data.get("quality"))))),
+        "smile": smile,
+        "reaction": reaction,
+        "energy": energy,
+        "quality": quality,
         "duration": max(2.0, min(10.0, safe_float(data.get("duration"), 5.0))),
         "description": str(data.get("description", "Moment événementiel"))[:300],
     }
@@ -375,20 +753,33 @@ def analyze_video(
     ffmpeg: str,
     row: sqlite3.Row,
     work: Path,
-    refs: list[Path],
+    references: list[ReferenceImage],
 ) -> list[dict]:
     path = Path(row["path"])
     duration = safe_float(row["duration"])
-    candidates = detect_scene_times(ffmpeg, path, duration, args.candidates)
+
+    if not path.exists():
+        raise RuntimeError("Fichier vidéo introuvable ou lecteur réseau déconnecté.")
+    if duration < 2:
+        return []
+
+    candidates = detect_scene_times(
+        ffmpeg,
+        path,
+        duration,
+        args.candidates,
+    )
     results: list[dict] = []
 
     for index, timestamp in enumerate(candidates, start=1):
         sheet = work / f"{abs(hash(str(path))) % 10**10}_{index}.jpg"
         if not extract_contact_sheet(ffmpeg, path, timestamp, duration, sheet):
             continue
-        analysis = analyze_sheet(args, sheet, refs)
+
+        analysis = analyze_sheet(args, sheet, references)
         if analysis["score"] < args.min_score or analysis["quality"] < 35:
             continue
+
         clip_duration = analysis["duration"]
         start = max(0.0, timestamp - clip_duration * 0.4)
         end = min(duration, start + clip_duration)
@@ -405,30 +796,52 @@ def analyze_video(
             selected.append(item)
         if len(selected) >= args.top_moments:
             break
+
     return selected
 
 
 def write_csv(rows: list[sqlite3.Row], destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fields = [
-        "video_path", "start", "end", "score", "machine", "smile",
-        "reaction", "energy", "quality", "description"
+        "video_path", "start", "end", "start_timecode", "end_timecode",
+        "score", "machine", "smile", "reaction", "energy", "quality",
+        "description"
     ]
+
     with destination.open("w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
+
         for row in rows:
-            writer.writerow({field: row[field] for field in fields})
+            writer.writerow({
+                "video_path": row["video_path"],
+                "start": round(safe_float(row["start"]), 3),
+                "end": round(safe_float(row["end"]), 3),
+                "start_timecode": timecode(safe_float(row["start"])),
+                "end_timecode": timecode(safe_float(row["end"])),
+                "score": row["score"],
+                "machine": row["machine"],
+                "smile": row["smile"],
+                "reaction": row["reaction"],
+                "energy": row["energy"],
+                "quality": row["quality"],
+                "description": row["description"],
+            })
 
 
 def jsx_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_name: str) -> None:
+def generate_after_effects(
+    rows: list[sqlite3.Row],
+    destination: Path,
+    event_name: str,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     clips = [dict(row) for row in rows[:30]]
     payload = json.dumps(clips, ensure_ascii=False)
+
     script = f'''// Montage AI — projet After Effects généré automatiquement
 (function () {{
     app.beginUndoGroup("Montage AI");
@@ -436,7 +849,8 @@ def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_nam
     var project = app.project || app.newProject();
     var folder = project.items.addFolder("MONTAGE AI - RUSHS");
     var comp = project.items.addComp({jsx_string(event_name + " - REEL 30S")}, 1080, 1920, 1, 30, 25);
-    var review = project.items.addComp("SELECTS_REVIEW", 1920, 1080, 1, Math.max(30, clips.length * 6), 25);
+    var reviewDuration = Math.max(30, clips.length * 10);
+    var review = project.items.addComp("SELECTS_REVIEW", 1920, 1080, 1, reviewDuration, 25);
     var cursor = 0;
     var reviewCursor = 0;
 
@@ -451,6 +865,7 @@ def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_nam
         var clip = clips[i];
         var file = new File(clip.video_path);
         if (!file.exists) continue;
+
         var footage = project.importFile(new ImportOptions(file));
         footage.parentFolder = folder;
         var duration = Math.max(1, clip.end - clip.start);
@@ -461,7 +876,9 @@ def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_nam
             layer.inPoint = cursor;
             layer.outPoint = Math.min(comp.duration, cursor + duration);
             fit(layer, comp.width, comp.height);
-            var marker = new MarkerValue("Score " + clip.score + " | " + clip.machine + " | " + clip.description);
+            var marker = new MarkerValue(
+                "Score " + clip.score + " | " + clip.machine + " | " + clip.description
+            );
             layer.property("Marker").setValueAtTime(cursor, marker);
             cursor += duration;
         }}
@@ -469,7 +886,7 @@ def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_nam
         var reviewLayer = review.layers.add(footage);
         reviewLayer.startTime = reviewCursor - clip.start;
         reviewLayer.inPoint = reviewCursor;
-        reviewLayer.outPoint = reviewCursor + duration;
+        reviewLayer.outPoint = Math.min(review.duration, reviewCursor + duration);
         fit(reviewLayer, review.width, review.height);
         reviewCursor += duration;
     }}
@@ -481,62 +898,168 @@ def generate_after_effects(rows: list[sqlite3.Row], destination: Path, event_nam
     destination.write_text(script, encoding="utf-8")
 
 
-def main() -> None:
+def print_top(rows: list[sqlite3.Row], machine: str) -> None:
+    print(f"\nTop {len(rows)} — {machine}")
+    if not rows:
+        print("  Aucun moment correspondant dans la base.")
+        return
+
+    for rank, row in enumerate(rows, start=1):
+        filename = Path(row["video_path"]).name
+        print(
+            f"  {rank:>2}. Score {row['score']:>3} | "
+            f"{timecode(row['start'])} → {timecode(row['end'])} | {filename}"
+        )
+
+
+def export_results(
+    database: Database,
+    output: Path,
+    args: argparse.Namespace,
+) -> None:
+    all_rows = database.all_moments()
+    top_rows = database.all_moments(
+        machine=args.top_machine,
+        limit=args.top_limit,
+    )
+
+    all_csv = output / "moments.csv"
+    top_name = safe_filename(args.top_machine.lower())
+    top_csv = output / f"top_{args.top_limit}_{top_name}.csv"
+    jsx_file = output / "MSB_Creer_Projet_After_Effects.jsx"
+
+    write_csv(all_rows, all_csv)
+    write_csv(top_rows, top_csv)
+    generate_after_effects(all_rows, jsx_file, args.event_name)
+    print_top(top_rows, args.top_machine)
+
+    print("\nExports :")
+    print(f"  Tous les moments : {all_csv}")
+    print(f"  Top {args.top_limit} {args.top_machine} : {top_csv}")
+    print(f"  After Effects : {jsx_file}")
+
+
+def print_database_status(database: Database) -> None:
+    counts = database.status_counts()
+    total = sum(counts.values())
+    print("\nÉtat de la base SQLite :")
+    print(f"  Total : {total}")
+    print(f"  À analyser : {counts.get('new', 0)}")
+    print(f"  Terminées : {counts.get('done', 0)}")
+    print(f"  En erreur : {counts.get('error', 0)}")
+
+
+def main() -> int:
     args = parse_args()
     source = Path(args.source)
     output = Path(args.output).resolve()
     work = output / "work"
     database_path = output / "video_index.sqlite3"
+    output.mkdir(parents=True, exist_ok=True)
 
-    if not source.exists():
-        raise SystemExit(f"ERREUR : dossier introuvable : {source}")
-
-    ffmpeg = require_program("ffmpeg")
-    ffprobe = require_program("ffprobe")
     database = Database(database_path)
 
     try:
-        print(f"Indexation : {source}")
-        count = 0
-        for path in discover_videos(source):
-            info = probe_video(ffprobe, path)
-            if info and info.duration >= 2:
-                database.upsert_video(info)
-                count += 1
-                if count % 100 == 0:
-                    print(f"  {count} vidéos indexées")
+        if args.export_only:
+            export_results(database, output, args)
+            print_database_status(database)
+            print(f"\nBase SQLite : {database_path}")
+            return 0
 
-        todo = database.next_videos(args.max_videos)
-        print(f"Analyse de {len(todo)} vidéo(s).")
-        refs = reference_images(Path(args.references))
+        if not args.skip_index:
+            if not source.exists():
+                raise SystemExit(f"ERREUR : dossier introuvable : {source}")
+            ffprobe = require_program("ffprobe")
+
+            start_time = time.monotonic()
+            try:
+                counters = index_videos(
+                    database,
+                    ffprobe,
+                    source,
+                    args.max_index,
+                )
+            except KeyboardInterrupt:
+                print_database_status(database)
+                print(f"Base SQLite : {database_path}")
+                return 130
+
+            elapsed = time.monotonic() - start_time
+            print("\nIndexation terminée :")
+            print(f"  Fichiers parcourus : {counters['discovered']}")
+            print(f"  Nouvelles vidéos : {counters['new']}")
+            print(f"  Vidéos modifiées : {counters['updated']}")
+            print(f"  Déjà connues : {counters['unchanged']}")
+            print(f"  Illisibles ou trop courtes : {counters['invalid']}")
+            print(f"  Durée : {elapsed / 60:.1f} minute(s)")
+        else:
+            print("Indexation ignorée : utilisation de la base SQLite existante.")
+            if not database.has_videos():
+                raise SystemExit(
+                    "ERREUR : la base SQLite ne contient aucune vidéo. "
+                    "Lance d'abord une indexation sans --skip-index."
+                )
+
+        print_database_status(database)
+
+        if args.index_only:
+            print(f"\nBase SQLite : {database_path}")
+            return 0
+
+        ffmpeg = require_program("ffmpeg")
+        check_ollama(args.ollama_url, args.model)
+
+        todo = database.next_videos(
+            limit=args.max_videos,
+            retry_errors=args.retry_errors,
+            reanalyze=args.reanalyze,
+        )
+        print(f"\nAnalyse de {len(todo)} vidéo(s).")
+
+        references = reference_images(Path(args.references))
+        if references:
+            names = ", ".join(reference.machine for reference in references)
+            print(f"Références machines chargées : {names}")
+        else:
+            print("Aucune référence machine trouvée. La reconnaissance sera moins fiable.")
+
         work.mkdir(parents=True, exist_ok=True)
+        analysis_start = time.monotonic()
 
         for index, row in enumerate(todo, start=1):
-            path = row["path"]
-            print(f"[{index}/{len(todo)}] {Path(path).name}")
+            video_path = str(row["path"])
+            print(f"[{index}/{len(todo)}] {Path(video_path).name}")
             try:
-                moments = analyze_video(args, ffmpeg, row, work, refs)
-                database.save_moments(path, moments)
+                moments = analyze_video(
+                    args,
+                    ffmpeg,
+                    row,
+                    work,
+                    references,
+                )
+                database.save_moments(video_path, moments)
                 print(f"  {len(moments)} moment(s) retenu(s)")
+            except KeyboardInterrupt:
+                print("\nAnalyse interrompue. Les vidéos déjà terminées restent enregistrées.")
+                return 130
             except Exception as exc:
-                database.mark_error(path, str(exc))
+                database.mark_error(video_path, str(exc))
                 print(f"  ERREUR : {exc}")
 
-        rows = database.all_moments()
-        write_csv(rows, output / "moments.csv")
-        generate_after_effects(
-            rows,
-            output / "MSB_Creer_Projet_After_Effects.jsx",
-            args.event_name,
-        )
+        elapsed = time.monotonic() - analysis_start
+        export_results(database, output, args)
+        print_database_status(database)
+
         print("\nTerminé.")
         print(f"Base SQLite : {database_path}")
-        print(f"CSV : {output / 'moments.csv'}")
-        print(f"After Effects : {output / 'MSB_Creer_Projet_After_Effects.jsx'}")
+        print(f"Durée de l'analyse : {elapsed / 60:.1f} minute(s)")
+        return 0
+
     finally:
         database.close()
-        shutil.rmtree(work, ignore_errors=True)
+        if not args.keep_work:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
