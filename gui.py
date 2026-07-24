@@ -27,7 +27,8 @@ class MontageAIApp(tk.Tk):
         self.source = tk.StringVar(value=r"P:\Montage-EVENT\ALL_MONTAGE")
         self.output = tk.StringVar(value=str(Path(__file__).parent / "resultats"))
         self.references = tk.StringVar(value=str(Path(__file__).parent / "machine_references"))
-        self.model = tk.StringVar(value="gemma3")
+        self.provider = tk.StringVar(value="Cloud Ollama (Free)")
+        self.model = tk.StringVar(value="qwen3-vl:235b-cloud")
         self.ollama_url = tk.StringVar(value="http://localhost:11434")
         self.max_index = tk.IntVar(value=5)
         self.max_videos = tk.IntVar(value=5)
@@ -75,8 +76,16 @@ class MontageAIApp(tk.Tk):
                 row=1, column=column, sticky="ew", padx=3
             )
 
-        ttk.Label(settings, text="Modèle Ollama").grid(row=0, column=5, sticky="w", padx=3)
-        ttk.Entry(settings, textvariable=self.model).grid(row=1, column=5, sticky="ew", padx=3)
+        ttk.Label(settings, text="Mode IA").grid(row=0, column=5, sticky="w", padx=3)
+        provider_box = ttk.Combobox(
+            settings,
+            textvariable=self.provider,
+            values=("Cloud Ollama (Free)", "Local"),
+            state="readonly",
+            width=18,
+        )
+        provider_box.grid(row=1, column=5, sticky="ew", padx=3)
+        provider_box.bind("<<ComboboxSelected>>", self._provider_changed)
 
         ttk.Checkbutton(settings, text="Ignorer l'indexation", variable=self.skip_index).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(10, 0)
@@ -106,6 +115,15 @@ class MontageAIApp(tk.Tk):
             presets, text="Qualité", command=lambda: self._apply_preset("quality")
         ).pack(side="left", padx=2)
 
+        ttk.Label(settings, text="Modèle").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(settings, textvariable=self.model).grid(
+            row=4, column=1, columnspan=3, sticky="ew", padx=3, pady=(8, 0)
+        )
+        ttk.Label(
+            settings,
+            text="Cloud Free : connexion Ollama obligatoire",
+        ).grid(row=4, column=4, columnspan=2, sticky="e", pady=(8, 0))
+
         help_frame = ttk.LabelFrame(outer, text="À quoi servent les réglages ?", padding=9)
         help_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         help_text = (
@@ -114,7 +132,8 @@ class MontageAIApp(tk.Tk):
             "plus l'analyse est précise mais lente.  Moments/vidéo = extraits finalement gardés.\n"
             "Score minimum = sévérité de la sélection.  Réessayer les erreurs reprend les échecs "
             "sans toucher aux réussites.  Réanalyser ignore le cache et recalcule aussi les vidéos "
-            "terminées.  Gemma3 est le modèle recommandé sur cette machine."
+            "terminées.  Cloud Ollama utilise Qwen3-VL sur les serveurs Ollama ; Local utilise "
+            "Gemma3 sur ce PC. Seules les grilles JPEG sont envoyées au cloud, jamais les vidéos."
         )
         ttk.Label(help_frame, text=help_text, wraplength=910, justify="left").pack(fill="x")
 
@@ -167,6 +186,14 @@ class MontageAIApp(tk.Tk):
         if value:
             self.references.set(value)
 
+    def _provider_changed(self, _event=None) -> None:
+        if self.provider.get().startswith("Cloud"):
+            self.model.set("qwen3-vl:235b-cloud")
+            self.status.set("Cloud Ollama Free : vérifie que 'ollama signin' a été exécuté.")
+        else:
+            self.model.set("gemma3")
+            self.status.set("Mode local : l'analyse utilise les ressources de ce PC.")
+
     def _apply_preset(self, name: str) -> None:
         presets = {
             "fast": (3, 1, 65, "Rapide : moins d'appels Ollama, sélection stricte."),
@@ -187,6 +214,7 @@ class MontageAIApp(tk.Tk):
             self.source.get().strip(),
             "--output", self.output.get().strip(),
             "--references", self.references.get().strip(),
+            "--provider", "cloud" if self.provider.get().startswith("Cloud") else "local",
             "--model", self.model.get().strip(),
             "--ollama-url", self.ollama_url.get().strip(),
             "--max-index", str(self.max_index.get()),

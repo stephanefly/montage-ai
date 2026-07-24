@@ -126,7 +126,13 @@ def parse_args() -> argparse.Namespace:
     analysis_group.add_argument("--min-score", type=int, default=58)
 
     ai_group = parser.add_argument_group("Ollama")
-    ai_group.add_argument("--model", default="gemma3")
+    ai_group.add_argument(
+        "--provider",
+        choices=("cloud", "local"),
+        default="cloud",
+        help="cloud = Ollama Cloud via l'application locale ; local = GPU de ce PC."
+    )
+    ai_group.add_argument("--model", default="")
     ai_group.add_argument("--ollama-url", default="http://localhost:11434")
     ai_group.add_argument("--references", default="machine_references")
 
@@ -151,6 +157,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    if not args.model:
+        args.model = (
+            "qwen3-vl:235b-cloud" if args.provider == "cloud" else "gemma3"
+        )
 
     if args.max_index < 0 or args.max_videos < 0:
         parser.error("--max-index et --max-videos doivent être positifs ou égaux à 0.")
@@ -748,7 +758,7 @@ def image_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
-def check_ollama(url: str, model: str) -> None:
+def check_ollama(url: str, model: str, provider: str) -> None:
     tags_url = f"{url.rstrip('/')}/api/tags"
     try:
         with urllib.request.urlopen(tags_url, timeout=10) as response:
@@ -769,6 +779,13 @@ def check_ollama(url: str, model: str) -> None:
         for name in installed_names
     )
     if not model_is_present:
+        if provider == "cloud":
+            raise SystemExit(
+                f"ERREUR : le modèle cloud '{model}' n'est pas préparé.\n"
+                "Connecte-toi puis prépare-le avec :\n"
+                "  ollama signin\n"
+                f"  ollama pull {model}"
+            )
         raise SystemExit(
             f"ERREUR : le modèle Ollama '{model}' n'est pas installé.\n"
             f"Commande : ollama pull {model}"
@@ -787,7 +804,12 @@ def ollama_request(url: str, payload: dict, timeout: int = 180) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(
+        error_type = (
+            OllamaUnavailableError
+            if exc.code in {401, 403, 429} or exc.code >= 500
+            else RuntimeError
+        )
+        raise error_type(
             f"Ollama a refusé la requête (HTTP {exc.code}) : {detail}"
         ) from exc
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
@@ -1293,7 +1315,7 @@ def main() -> int:
             return 0
 
         ffmpeg = require_program("ffmpeg")
-        check_ollama(args.ollama_url, args.model)
+        check_ollama(args.ollama_url, args.model, args.provider)
 
         todo = database.next_videos(
             limit=args.max_videos,

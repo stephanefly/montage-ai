@@ -27,7 +27,7 @@ Installe une seule fois :
 1. Python 3 ;
 2. FFmpeg ;
 3. Ollama ;
-4. le modèle de vision `gemma3`.
+4. un compte Ollama gratuit pour le mode cloud, ou le modèle local `gemma3`.
 
 ### Installer FFmpeg sous Windows
 
@@ -44,7 +44,18 @@ ffmpeg -version
 ffprobe -version
 ```
 
-### Installer le modèle Ollama
+### Préparer Ollama Cloud Free — recommandé
+
+```powershell
+ollama signin
+ollama pull qwen3-vl:235b-cloud
+```
+
+Le navigateur s'ouvre pour connecter le compte Ollama. Le modèle reste exécuté
+dans le cloud : seules les grilles JPEG extraites sont envoyées, jamais les
+vidéos originales. Le mode cloud est sélectionné par défaut dans l'IHM.
+
+### Installer le modèle Ollama local — solution de secours
 
 ```powershell
 ollama pull gemma3
