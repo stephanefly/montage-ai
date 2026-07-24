@@ -759,10 +759,19 @@ def parse_ollama_json(value: object) -> dict:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        preview = raw[:200].replace("\n", " ")
-        raise RuntimeError(
-            f"Ollama a renvoyé un JSON d'analyse invalide : {preview!r}"
-        ) from exc
+        object_start = raw.find("{")
+        if object_start >= 0:
+            try:
+                data, _ = json.JSONDecoder().raw_decode(raw[object_start:])
+            except json.JSONDecodeError:
+                data = None
+        else:
+            data = None
+        if data is None:
+            preview = raw[:200].replace("\n", " ")
+            raise RuntimeError(
+                f"Ollama a renvoyé un JSON d'analyse invalide : {preview!r}"
+            ) from exc
 
     if not isinstance(data, dict):
         raise RuntimeError("Ollama a renvoyé un JSON qui n'est pas un objet.")
@@ -795,24 +804,39 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
         "images": images,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.0},
+        "options": {"temperature": 0.0, "num_predict": 512},
     }
     last_error: RuntimeError | None = None
-    for attempt in range(1, 3):
+    for attempt in range(1, 4):
         try:
+            attempt_payload = dict(payload)
+            if attempt == 3:
+                attempt_payload.pop("format", None)
             response = ollama_request(
                 f"{args.ollama_url.rstrip('/')}/api/generate",
-                payload,
+                attempt_payload,
             )
-            data = parse_ollama_json(response.get("response"))
+            raw = response.get("response") or response.get("thinking")
+            if not raw:
+                raise RuntimeError(
+                    "Ollama a renvoyé une réponse incomplète "
+                    f"(model={response.get('model')!r}, done={response.get('done')!r}, "
+                    f"done_reason={response.get('done_reason')!r})."
+                )
+            data = parse_ollama_json(raw)
             return data
         except RuntimeError as exc:
             last_error = exc
-            if attempt < 2:
-                time.sleep(1)
+            if attempt < 3:
+                time.sleep(2 if attempt == 1 else 5)
 
+    restart_hint = (
+        " Ferme puis relance Ollama avant de réessayer."
+        if last_error and "réponse incomplète" in str(last_error)
+        else ""
+    )
     raise RuntimeError(
-        f"Analyse Ollama impossible après 2 tentatives : {last_error}"
+        f"Analyse Ollama impossible après 3 tentatives : {last_error}.{restart_hint}"
     ) from last_error
 
 
