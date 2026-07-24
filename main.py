@@ -48,6 +48,10 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ANALYSIS_VERSION = 4
 
 
+class OllamaUnavailableError(RuntimeError):
+    """Ollama est indisponible ou son moteur de modèle est dans un état invalide."""
+
+
 @dataclass
 class VideoInfo:
     path: Path
@@ -850,7 +854,7 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
         "images": images,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.0, "num_predict": 512},
+        "options": {"temperature": 0.1, "num_predict": 256},
     }
     last_error: RuntimeError | None = None
     for attempt in range(1, 4):
@@ -864,10 +868,15 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
             )
             raw = response.get("response") or response.get("thinking")
             if not raw:
-                raise RuntimeError(
+                raise OllamaUnavailableError(
                     "Ollama a renvoyé une réponse incomplète "
                     f"(model={response.get('model')!r}, done={response.get('done')!r}, "
                     f"done_reason={response.get('done_reason')!r})."
+                )
+            if re.fullmatch(r"(?:<unused\d+>)+", str(raw).strip()):
+                raise OllamaUnavailableError(
+                    "Ollama a renvoyé uniquement des jetons réservés ; "
+                    "le moteur du modèle doit être redémarré"
                 )
             data = parse_ollama_json(raw)
             return data
@@ -876,12 +885,17 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
             if attempt < 3:
                 time.sleep(2 if attempt == 1 else 5)
 
+    error_type = (
+        OllamaUnavailableError
+        if isinstance(last_error, OllamaUnavailableError)
+        else RuntimeError
+    )
     restart_hint = (
         " Ferme puis relance Ollama avant de réessayer."
-        if last_error and "réponse incomplète" in str(last_error)
+        if error_type is OllamaUnavailableError
         else ""
     )
-    raise RuntimeError(
+    raise error_type(
         f"Analyse Ollama impossible après 3 tentatives : {last_error}.{restart_hint}"
     ) from last_error
 
@@ -1030,6 +1044,8 @@ def analyze_video(
                     str(path), timestamp, args.model, analysis
                 )
                 analyzed_candidates += 1
+            except OllamaUnavailableError:
+                raise
             except RuntimeError as exc:
                 analysis_errors.append(str(exc))
                 print(f"    AVERTISSEMENT : candidat {index} ignoré ({exc})")
@@ -1313,6 +1329,13 @@ def main() -> int:
             except KeyboardInterrupt:
                 print("\nAnalyse interrompue. Les vidéos déjà terminées restent enregistrées.")
                 return 130
+            except OllamaUnavailableError as exc:
+                print(f"  ERREUR OLLAMA : {exc}")
+                print(
+                    "Analyse arrêtée pour ne pas classer d'autres vidéos en erreur. "
+                    "Redémarre Ollama puis relance avec --retry-errors."
+                )
+                return 2
             except Exception as exc:
                 database.mark_error(video_path, str(exc))
                 print(f"  ERREUR : {exc}")

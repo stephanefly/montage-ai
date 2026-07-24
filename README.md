@@ -151,6 +151,10 @@ python main.py --skip-index --max-videos 0
 python main.py --skip-index --max-videos 20 --retry-errors
 ```
 
+Si Ollama renvoie une réponse vide ou des jetons `<unused...>`, arrête le lot,
+ferme puis relance Ollama. Le programme déclenche automatiquement un
+coupe-circuit afin de ne pas classer les vidéos suivantes en erreur.
+
 ## Réanalyser des vidéos déjà terminées
 
 ```powershell
