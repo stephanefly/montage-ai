@@ -87,6 +87,19 @@ Cette commande :
 3. teste 3 passages par vidéo ;
 4. conserve 2 passages maximum par vidéo.
 
+## Interface graphique Windows
+
+Double-clique sur :
+
+```text
+LANCER_IHM.bat
+```
+
+L'interface permet de choisir les dossiers, régler le nombre de vidéos et de
+candidats, relancer les vidéos en erreur, démarrer ou arrêter l'analyse et
+suivre les messages du programme en direct. Elle utilise uniquement Tkinter,
+fourni avec l'installation standard de Python.
+
 ## Analyser 5 vidéos déjà indexées
 
 Cette commande ne rescane pas le NAS :
