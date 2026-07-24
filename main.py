@@ -831,31 +831,6 @@ def analyze_grids(
     if reference_grid is not None:
         machine_images.append(image_base64(reference_grid))
 
-    machine_data = ollama_json_with_retry(args, f"""
-L'image 1 est une grille de cinq instants successifs d'un même passage, dans
-l'ordre de lecture. L'image 2, si présente, est une grille de références dans
-l'ordre de lecture : {reference_description}.
-
-Identifie uniquement la machine réellement visible parmi Photobooth,
-VogueBooth, 360Booth, MiroirBooth ou Aucune. Une décoration, un téléphone, un
-miroir ordinaire ou des invités ne sont pas des preuves. La structure doit être
-visible sur au moins deux des cinq images et correspondre à une référence.
-En cas de doute, réponds Aucune.
-
-Réponds uniquement en JSON avec : machine, confidence, visible_evidence,
-supporting_frames. confidence vaut 0 à 100 et supporting_frames est le nombre
-d'images du passage qui montrent réellement la machine.
-""".strip(), machine_images)
-
-    machine = normalize_machine(machine_data.get("machine"))
-    confidence = clamp_score(machine_data.get("confidence"))
-    evidence = str(machine_data.get("visible_evidence", "")).strip()
-    supporting_frames = int(safe_float(machine_data.get("supporting_frames")))
-    if machine != "Aucune" and (
-        confidence < 75 or supporting_frames < 2 or len(evidence) < 8
-    ):
-        machine = "Aucune"
-
     data = ollama_json_with_retry(args, """
 Tu notes une grille montrant cinq instants successifs d'un passage événementiel.
 Décris seulement ce qui est directement visible. N'identifie aucune marque ni
@@ -881,9 +856,37 @@ quality, duration, description.
         + energy * 0.15
         + quality * 0.20
     )
+    final_score = clamp_score(calculated_score)
+
+    machine = "Aucune"
+    if final_score >= args.min_score and quality >= 35:
+        machine_data = ollama_json_with_retry(args, f"""
+L'image 1 est une grille de cinq instants successifs d'un même passage, dans
+l'ordre de lecture. L'image 2, si présente, est une grille de références dans
+l'ordre de lecture : {reference_description}.
+
+Identifie uniquement la machine réellement visible parmi Photobooth,
+VogueBooth, 360Booth, MiroirBooth ou Aucune. Une décoration, un téléphone, un
+miroir ordinaire ou des invités ne sont pas des preuves. La structure doit être
+visible sur au moins deux des cinq images et correspondre à une référence.
+En cas de doute, réponds Aucune.
+
+Réponds uniquement en JSON avec : machine, confidence, visible_evidence,
+supporting_frames. confidence vaut 0 à 100 et supporting_frames est le nombre
+d'images du passage qui montrent réellement la machine.
+""".strip(), machine_images)
+
+        machine = normalize_machine(machine_data.get("machine"))
+        confidence = clamp_score(machine_data.get("confidence"))
+        evidence = str(machine_data.get("visible_evidence", "")).strip()
+        supporting_frames = int(safe_float(machine_data.get("supporting_frames")))
+        if machine != "Aucune" and (
+            confidence < 75 or supporting_frames < 2 or len(evidence) < 8
+        ):
+            machine = "Aucune"
 
     return {
-        "score": clamp_score(calculated_score),
+        "score": final_score,
         "machine": machine,
         "smile": smile,
         "reaction": reaction,

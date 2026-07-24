@@ -18,8 +18,8 @@ class MontageAIApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Montage AI")
-        self.geometry("920x720")
-        self.minsize(760, 600)
+        self.geometry("980x840")
+        self.minsize(820, 680)
 
         self.process: subprocess.Popen[str] | None = None
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -48,7 +48,7 @@ class MontageAIApp(tk.Tk):
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(2, weight=1)
+        outer.rowconfigure(3, weight=1)
 
         paths = ttk.LabelFrame(outer, text="Dossiers", padding=10)
         paths.grid(row=0, column=0, sticky="ew")
@@ -93,8 +93,33 @@ class MontageAIApp(tk.Tk):
             variable=self.reanalyze,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
+        presets = ttk.Frame(settings)
+        presets.grid(row=3, column=3, columnspan=3, sticky="e", pady=(6, 0))
+        ttk.Label(presets, text="Préréglage :").pack(side="left", padx=(0, 5))
+        ttk.Button(
+            presets, text="Rapide", command=lambda: self._apply_preset("fast")
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            presets, text="Équilibré", command=lambda: self._apply_preset("balanced")
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            presets, text="Qualité", command=lambda: self._apply_preset("quality")
+        ).pack(side="left", padx=2)
+
+        help_frame = ttk.LabelFrame(outer, text="À quoi servent les réglages ?", padding=9)
+        help_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        help_text = (
+            "Indexer = ajouter les fichiers du NAS à SQLite.  Vidéos à analyser = taille du lot "
+            "(0 signifie toutes).  Candidats/vidéo = passages testés : plus ce nombre est grand, "
+            "plus l'analyse est précise mais lente.  Moments/vidéo = extraits finalement gardés.\n"
+            "Score minimum = sévérité de la sélection.  Réessayer les erreurs reprend les échecs "
+            "sans toucher aux réussites.  Réanalyser ignore le cache et recalcule aussi les vidéos "
+            "terminées.  Gemma3 est le modèle recommandé sur cette machine."
+        )
+        ttk.Label(help_frame, text=help_text, wraplength=910, justify="left").pack(fill="x")
+
         console_frame = ttk.LabelFrame(outer, text="Journal", padding=8)
-        console_frame.grid(row=2, column=0, sticky="nsew")
+        console_frame.grid(row=3, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(
@@ -112,7 +137,7 @@ class MontageAIApp(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky="ns")
 
         actions = ttk.Frame(outer)
-        actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         actions.columnconfigure(1, weight=1)
         self.start_button = ttk.Button(actions, text="Lancer", command=self._start)
         self.stop_button = ttk.Button(actions, text="Arrêter", command=self._stop, state="disabled")
@@ -141,6 +166,18 @@ class MontageAIApp(tk.Tk):
         value = filedialog.askdirectory(title="Choisir le dossier des références")
         if value:
             self.references.set(value)
+
+    def _apply_preset(self, name: str) -> None:
+        presets = {
+            "fast": (3, 1, 65, "Rapide : moins d'appels Ollama, sélection stricte."),
+            "balanced": (5, 2, 60, "Équilibré : recommandé pour les traitements courants."),
+            "quality": (8, 3, 58, "Qualité : davantage de passages testés, analyse plus lente."),
+        }
+        candidates, moments, score, description = presets[name]
+        self.candidates.set(candidates)
+        self.top_moments.set(moments)
+        self.min_score.set(score)
+        self.status.set(description)
 
     def _command(self) -> list[str]:
         command = [

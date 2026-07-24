@@ -102,6 +102,10 @@ candidats, relancer les vidéos en erreur, démarrer ou arrêter l'analyse et
 suivre les messages du programme en direct. Elle utilise uniquement Tkinter,
 fourni avec l'installation standard de Python.
 
+Une aide intégrée explique chaque réglage. Trois préréglages sont disponibles :
+`Rapide`, `Équilibré` et `Qualité`. Le mode Équilibré est recommandé pour une
+première analyse.
+
 ## Analyser 5 vidéos déjà indexées
 
 Cette commande ne rescane pas le NAS :
