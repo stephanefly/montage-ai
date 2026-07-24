@@ -36,6 +36,7 @@ class MontageAIApp(tk.Tk):
         self.min_score = tk.IntVar(value=58)
         self.skip_index = tk.BooleanVar(value=False)
         self.retry_errors = tk.BooleanVar(value=False)
+        self.reanalyze = tk.BooleanVar(value=False)
         self.keep_work = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Prêt")
 
@@ -86,6 +87,11 @@ class MontageAIApp(tk.Tk):
         ttk.Checkbutton(settings, text="Conserver les fichiers temporaires", variable=self.keep_work).grid(
             row=2, column=4, columnspan=2, sticky="w", pady=(10, 0)
         )
+        ttk.Checkbutton(
+            settings,
+            text="Réanalyser sans utiliser le cache",
+            variable=self.reanalyze,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         console_frame = ttk.LabelFrame(outer, text="Journal", padding=8)
         console_frame.grid(row=2, column=0, sticky="nsew")
@@ -156,6 +162,8 @@ class MontageAIApp(tk.Tk):
             command.append("--skip-index")
         if self.retry_errors.get():
             command.append("--retry-errors")
+        if self.reanalyze.get():
+            command.append("--reanalyze")
         if self.keep_work.get():
             command.append("--keep-work")
         return command

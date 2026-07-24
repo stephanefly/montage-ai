@@ -45,6 +45,7 @@ EXCLUDED_FOLDERS = {
 
 MACHINES = ["Photobooth", "VogueBooth", "360Booth", "MiroirBooth", "Aucune"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ANALYSIS_VERSION = 3
 
 
 @dataclass
@@ -294,6 +295,16 @@ class Database:
                 FOREIGN KEY(video_path) REFERENCES videos(path) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS analysis_cache (
+                video_path TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                model TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                analysis_json TEXT NOT NULL,
+                PRIMARY KEY(video_path, timestamp, model, version),
+                FOREIGN KEY(video_path) REFERENCES videos(path) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_videos_status
             ON videos(status, mtime_ns DESC);
 
@@ -355,7 +366,49 @@ class Database:
                 "DELETE FROM moments WHERE video_path = ?",
                 (video_path,)
             )
+            self.connection.execute(
+                "DELETE FROM analysis_cache WHERE video_path = ?",
+                (video_path,)
+            )
         return state
+
+    def cached_analysis(
+        self,
+        video_path: str,
+        timestamp: float,
+        model: str,
+    ) -> dict | None:
+        row = self.connection.execute("""
+            SELECT analysis_json FROM analysis_cache
+            WHERE video_path=? AND timestamp=? AND model=? AND version=?
+        """, (video_path, timestamp, model, ANALYSIS_VERSION)).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["analysis_json"])
+            return value if isinstance(value, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    def save_cached_analysis(
+        self,
+        video_path: str,
+        timestamp: float,
+        model: str,
+        analysis: dict,
+    ) -> None:
+        self.connection.execute("""
+            INSERT OR REPLACE INTO analysis_cache(
+                video_path, timestamp, model, version, analysis_json
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            video_path,
+            timestamp,
+            model,
+            ANALYSIS_VERSION,
+            json.dumps(analysis, ensure_ascii=False),
+        ))
+        self.connection.commit()
 
     def commit(self) -> None:
         self.connection.commit()
@@ -552,33 +605,40 @@ def detect_scene_times(
     return unique
 
 
-def extract_contact_sheet(
+def extract_candidate_frames(
     ffmpeg: str,
     video: Path,
     timestamp: float,
     duration: float,
-    destination: Path,
-) -> bool:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    folder: Path,
+    prefix: str,
+) -> list[Path]:
+    folder.mkdir(parents=True, exist_ok=True)
     times = [
         max(0.05, min(duration - 0.05, timestamp + offset))
-        for offset in (-0.8, 0.0, 0.8)
+        for offset in (-1.2, -0.6, 0.0, 0.6, 1.2)
     ]
 
     inputs: list[str] = []
-    filters: list[str] = []
+    outputs: list[str] = []
+    destinations: list[Path] = []
     for index, value in enumerate(times):
         inputs.extend(["-ss", f"{value:.3f}", "-i", str(video)])
-        filters.append(f"[{index}:v]scale=420:-2[img{index}]")
+        destination = folder / f"{prefix}_{index + 1}.jpg"
+        destinations.append(destination)
+        outputs.extend([
+            "-map", f"{index}:v:0", "-frames:v", "1",
+            "-vf", "scale=768:-2", str(destination),
+        ])
 
-    filter_complex = ";".join(filters) + ";[img0][img1][img2]hstack=inputs=3[out]"
     result = run([
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *inputs,
-        "-filter_complex", filter_complex,
-        "-map", "[out]", "-frames:v", "1", str(destination)
+        *outputs,
     ], timeout=90)
 
-    return bool(result and result.returncode == 0 and destination.exists())
+    if not result or result.returncode != 0:
+        return []
+    return [path for path in destinations if path.exists()]
 
 
 def reference_images(folder: Path) -> list[ReferenceImage]:
@@ -691,70 +751,15 @@ def normalize_machine(value: object) -> str:
     return aliases.get(text, "Aucune")
 
 
-def analyze_sheet(
-    args: argparse.Namespace,
-    sheet: Path,
-    references: list[ReferenceImage],
-) -> dict:
-    reference_description = ", ".join(
-        f"image {index + 2} = {reference.machine}"
-        for index, reference in enumerate(references[:4])
-    )
-    if not reference_description:
-        reference_description = "aucune image de référence fournie"
-
-    prompt = f"""
-Tu analyses une vidéo événementielle MySelfieBooth.
-
-L'image 1 est une planche de trois instants successifs du même passage.
-Références éventuelles : {reference_description}.
-
-Évalue séparément :
-- smile : sourires et expressions positives ;
-- reaction : réaction forte, surprise, rire ou interaction ;
-- energy : mouvement, dynamisme et ambiance ;
-- quality : netteté, cadrage, lumière et visibilité des personnes.
-
-Identifie la machine principale visible parmi exactement :
-Photobooth, VogueBooth, 360Booth, MiroirBooth ou Aucune.
-Une machine ne peut être retenue que si sa structure est réellement visible dans
-l'image 1 et correspond à une référence. Le thème de la soirée, un mur décoré,
-des lumières, un téléphone, un miroir ordinaire ou la présence d'invités ne sont
-jamais des preuves suffisantes. N'infère rien hors champ.
-Si la machine est partiellement cachée, ambiguë ou absente, réponds Aucune.
-Donne machine_confidence entre 0 et 100 et visible_evidence, une preuve visuelle
-précise et directement observable. Pour Aucune, visible_evidence explique
-brièvement qu'aucune structure identifiable n'est visible.
-
-Barème strict du score global :
-- 0 à 39 : passage faible, flou, vide ou sans réaction nette ;
-- 40 à 59 : passage ordinaire ;
-- 60 à 74 : bon passage clairement exploitable ;
-- 75 à 89 : excellent passage avec réaction évidente ;
-- 90 à 100 : exceptionnel et rare.
-N'attribue jamais une note à partir d'un élément supposé ou invisible.
-Propose une durée d'extrait entre 2 et 10 secondes.
-
-Réponds uniquement en JSON valide avec les clés :
-score, machine, machine_confidence, visible_evidence, smile, reaction, energy,
-quality, duration, description.
-Toutes les notes sont des nombres de 0 à 100.
-La description doit être courte et factuelle.
-""".strip()
-
-    images = [image_base64(sheet)] + [
-        image_base64(reference.path)
-        for reference in references[:4]
-    ]
+def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[str]) -> dict:
     payload = {
         "model": args.model,
         "prompt": prompt,
         "images": images,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.1},
+        "options": {"temperature": 0.0},
     }
-
     last_error: RuntimeError | None = None
     for attempt in range(1, 3):
         try:
@@ -763,28 +768,71 @@ La description doit être courte et factuelle.
                 payload,
             )
             data = parse_ollama_json(response.get("response"))
-            break
+            return data
         except RuntimeError as exc:
             last_error = exc
             if attempt < 2:
                 time.sleep(1)
-    else:
-        raise RuntimeError(
-            f"Analyse Ollama impossible après 2 tentatives : {last_error}"
-        ) from last_error
+
+    raise RuntimeError(
+        f"Analyse Ollama impossible après 2 tentatives : {last_error}"
+    ) from last_error
+
+
+def analyze_frames(
+    args: argparse.Namespace,
+    frames: list[Path],
+    references: list[ReferenceImage],
+) -> dict:
+    frame_images = [image_base64(path) for path in frames]
+    reference_description = ", ".join(
+        f"référence {index + 1} = {reference.machine}"
+        for index, reference in enumerate(references[:4])
+    ) or "aucune référence fournie"
+    machine_images = frame_images + [
+        image_base64(reference.path) for reference in references[:4]
+    ]
+
+    machine_data = ollama_json_with_retry(args, f"""
+Tu compares cinq images successives d'un même passage événementiel avec des
+photos de référence placées après elles. {reference_description}.
+
+Identifie uniquement la machine réellement visible parmi Photobooth,
+VogueBooth, 360Booth, MiroirBooth ou Aucune. Une décoration, un téléphone, un
+miroir ordinaire ou des invités ne sont pas des preuves. La structure doit être
+visible sur au moins deux des cinq images et correspondre à une référence.
+En cas de doute, réponds Aucune.
+
+Réponds uniquement en JSON avec : machine, confidence, visible_evidence,
+supporting_frames. confidence vaut 0 à 100 et supporting_frames est le nombre
+d'images du passage qui montrent réellement la machine.
+""".strip(), machine_images)
+
+    machine = normalize_machine(machine_data.get("machine"))
+    confidence = clamp_score(machine_data.get("confidence"))
+    evidence = str(machine_data.get("visible_evidence", "")).strip()
+    supporting_frames = int(safe_float(machine_data.get("supporting_frames")))
+    if machine != "Aucune" and (
+        confidence < 75 or supporting_frames < 2 or len(evidence) < 8
+    ):
+        machine = "Aucune"
+
+    data = ollama_json_with_retry(args, """
+Tu notes cinq images successives d'un passage événementiel. Décris seulement ce
+qui est directement visible. N'identifie aucune marque ni machine.
+
+Évalue séparément smile, reaction, energy et quality de 0 à 100. Barème global :
+0-39 faible ou inexploitable, 40-59 ordinaire, 60-74 bon, 75-89 excellent avec
+réaction évidente, 90-100 exceptionnel et rare. Propose une durée de 2 à 10
+secondes. Réponds uniquement en JSON avec : score, smile, reaction, energy,
+quality, duration, description.
+""".strip(), frame_images)
 
     smile = clamp_score(data.get("smile"))
     reaction = clamp_score(data.get("reaction"))
     energy = clamp_score(data.get("energy"))
     quality = clamp_score(data.get("quality"))
     ai_score = clamp_score(data.get("score"))
-    machine = normalize_machine(data.get("machine"))
-    machine_confidence = clamp_score(data.get("machine_confidence"))
-    visible_evidence = str(data.get("visible_evidence", "")).strip()
-    if machine != "Aucune" and (
-        machine_confidence < 75 or len(visible_evidence) < 8
-    ):
-        machine = "Aucune"
 
     calculated_score = round(
         ai_score * 0.15
@@ -808,6 +856,7 @@ La description doit être courte et factuelle.
 
 def analyze_video(
     args: argparse.Namespace,
+    database: Database,
     ffmpeg: str,
     row: sqlite3.Row,
     work: Path,
@@ -832,17 +881,30 @@ def analyze_video(
     analyzed_candidates = 0
 
     for index, timestamp in enumerate(candidates, start=1):
-        sheet = work / f"{abs(hash(str(path))) % 10**10}_{index}.jpg"
-        if not extract_contact_sheet(ffmpeg, path, timestamp, duration, sheet):
-            continue
-
-        try:
-            analysis = analyze_sheet(args, sheet, references)
+        analysis = None if args.reanalyze else database.cached_analysis(
+            str(path), timestamp, args.model
+        )
+        if analysis is not None:
             analyzed_candidates += 1
-        except RuntimeError as exc:
-            analysis_errors.append(str(exc))
-            print(f"    AVERTISSEMENT : candidat {index} ignoré ({exc})")
-            continue
+            print(f"    candidat {index} : cache SQLite")
+        else:
+            prefix = f"{abs(hash(str(path))) % 10**10}_{index}"
+            frames = extract_candidate_frames(
+                ffmpeg, path, timestamp, duration, work, prefix
+            )
+            if len(frames) < 3:
+                continue
+
+            try:
+                analysis = analyze_frames(args, frames, references)
+                database.save_cached_analysis(
+                    str(path), timestamp, args.model, analysis
+                )
+                analyzed_candidates += 1
+            except RuntimeError as exc:
+                analysis_errors.append(str(exc))
+                print(f"    AVERTISSEMENT : candidat {index} ignoré ({exc})")
+                continue
         if analysis["score"] < args.min_score or analysis["quality"] < 35:
             continue
 
@@ -1104,6 +1166,7 @@ def main() -> int:
             try:
                 moments = analyze_video(
                     args,
+                    database,
                     ffmpeg,
                     row,
                     work,

@@ -9,8 +9,10 @@ Les vidéos originales ne sont jamais modifiées, déplacées ou supprimées.
 - indexation progressive des vidéos du NAS dans SQLite ;
 - reprise sans rescanner tout le NAS avec `--skip-index` ;
 - détection des changements de scène avec FFmpeg ;
+- extraction de cinq images distinctes par passage pour préserver les détails ;
 - analyse des sourires, réactions, énergie et qualité ;
-- reconnaissance Photobooth, VogueBooth, 360Booth et MiroirBooth ;
+- reconnaissance indépendante Photobooth, VogueBooth, 360Booth et MiroirBooth ;
+- cache SQLite des analyses pour accélérer les relances identiques ;
 - classement automatique par score ;
 - génération d'un Top 10 Photobooth ;
 - export CSV avec timecodes ;
