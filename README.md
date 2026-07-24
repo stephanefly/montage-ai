@@ -206,7 +206,7 @@ resultats/MSB_Creer_Projet_After_Effects.jsx
 | Fichier | Utilité |
 |---|---|
 | `video_index.sqlite3` | Base de progression et résultats d'analyse |
-| `moments.csv` | Tous les passages classés par score |
+| `moments.csv` | Tous les passages classés avec action, expression, cadrage, niveaux de confiance et preuves visibles |
 | `top_10_photobooth.csv` | Les meilleurs passages Photobooth |
 | `MSB_Creer_Projet_After_Effects.jsx` | Création automatique des compositions After Effects |
 

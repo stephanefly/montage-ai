@@ -45,7 +45,7 @@ EXCLUDED_FOLDERS = {
 
 MACHINES = ["Photobooth", "VogueBooth", "360Booth", "MiroirBooth", "Aucune"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-ANALYSIS_VERSION = 4
+ANALYSIS_VERSION = 5
 
 
 class OllamaUnavailableError(RuntimeError):
@@ -307,6 +307,13 @@ class Database:
                 energy INTEGER NOT NULL,
                 quality INTEGER NOT NULL,
                 description TEXT NOT NULL,
+                people_count INTEGER NOT NULL DEFAULT -1,
+                action TEXT NOT NULL DEFAULT 'Indéterminée',
+                emotion TEXT NOT NULL DEFAULT 'Indéterminée',
+                framing TEXT NOT NULL DEFAULT 'Indéterminé',
+                description_confidence INTEGER NOT NULL DEFAULT 0,
+                machine_confidence INTEGER NOT NULL DEFAULT 0,
+                machine_evidence TEXT NOT NULL DEFAULT '',
                 UNIQUE(video_path, timestamp),
                 FOREIGN KEY(video_path) REFERENCES videos(path) ON DELETE CASCADE
             );
@@ -339,6 +346,24 @@ class Database:
             self.connection.execute(
                 "ALTER TABLE videos ADD COLUMN analysis_model TEXT NOT NULL DEFAULT ''"
             )
+        moment_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(moments)")
+        }
+        moment_migrations = {
+            "people_count": "INTEGER NOT NULL DEFAULT -1",
+            "action": "TEXT NOT NULL DEFAULT 'Indéterminée'",
+            "emotion": "TEXT NOT NULL DEFAULT 'Indéterminée'",
+            "framing": "TEXT NOT NULL DEFAULT 'Indéterminé'",
+            "description_confidence": "INTEGER NOT NULL DEFAULT 0",
+            "machine_confidence": "INTEGER NOT NULL DEFAULT 0",
+            "machine_evidence": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, declaration in moment_migrations.items():
+            if column not in moment_columns:
+                self.connection.execute(
+                    f"ALTER TABLE moments ADD COLUMN {column} {declaration}"
+                )
         self.connection.commit()
 
     def get_signature(self, video_path: str) -> sqlite3.Row | None:
@@ -510,12 +535,17 @@ class Database:
             self.connection.execute("""
                 INSERT OR REPLACE INTO moments(
                     video_path, timestamp, start, end, score, machine,
-                    smile, reaction, energy, quality, description
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    smile, reaction, energy, quality, description, people_count,
+                    action, emotion, framing, description_confidence,
+                    machine_confidence, machine_evidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 video_path, item["timestamp"], item["start"], item["end"],
                 item["score"], item["machine"], item["smile"], item["reaction"],
-                item["energy"], item["quality"], item["description"]
+                item["energy"], item["quality"], item["description"],
+                item["people_count"], item["action"], item["emotion"],
+                item["framing"], item["description_confidence"],
+                item["machine_confidence"], item["machine_evidence"]
             ))
         self.connection.execute("""
             UPDATE videos
@@ -869,6 +899,41 @@ def normalize_machine(value: object) -> str:
     return aliases.get(text, "Aucune")
 
 
+def normalize_choice(value: object, choices: dict[str, str], default: str) -> str:
+    return choices.get(str(value or "").strip().lower(), default)
+
+
+def factual_description(
+    people_count: int,
+    action: str,
+    emotion: str,
+    framing: str,
+    visible_facts: object,
+) -> str:
+    """Compose une description prudente à partir de champs contrôlés."""
+    if people_count < 0:
+        subject = "Nombre de personnes indéterminé"
+    elif people_count == 0:
+        subject = "Aucune personne clairement visible"
+    elif people_count == 1:
+        subject = "Une personne visible"
+    else:
+        subject = f"Environ {people_count} personnes visibles"
+
+    parts = [subject, f"action : {action.lower()}", f"expression : {emotion.lower()}"]
+    if framing != "Indéterminé":
+        parts.append(f"cadrage : {framing.lower()}")
+    if isinstance(visible_facts, list):
+        facts = []
+        for value in visible_facts[:3]:
+            fact = re.sub(r"\s+", " ", str(value)).strip(" .")
+            if 4 <= len(fact) <= 100:
+                facts.append(fact)
+        if facts:
+            parts.append("indices visibles : " + "; ".join(facts))
+    return (". ".join(parts) + ".")[:500]
+
+
 def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[str]) -> dict:
     payload = {
         "model": args.model,
@@ -876,7 +941,7 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
         "images": images,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.1, "num_predict": 256},
+        "options": {"temperature": 0.0, "num_predict": 512},
     }
     last_error: RuntimeError | None = None
     for attempt in range(1, 4):
@@ -938,15 +1003,22 @@ def analyze_grids(
         machine_images.append(image_base64(reference_grid))
 
     data = ollama_json_with_retry(args, """
-Tu notes une grille montrant cinq instants successifs d'un passage événementiel.
-Décris seulement ce qui est directement visible. N'identifie aucune marque ni
-machine.
+Tu analyses une grille de cinq images successives du même passage événementiel.
+Ne déduis ni identité, ni relation, ni marque, ni événement. Un fait n'est valide
+que s'il est directement visible sur au moins deux images. En cas de doute,
+utilise "indetermine" et baisse description_confidence.
 
-Évalue séparément smile, reaction, energy et quality de 0 à 100. Barème global :
-0-39 faible ou inexploitable, 40-59 ordinaire, 60-74 bon, 75-89 excellent avec
-réaction évidente, 90-100 exceptionnel et rare. Propose une durée de 2 à 10
-secondes. Réponds uniquement en JSON avec : score, smile, reaction, energy,
-quality, duration, description.
+Retourne people_count (-1 si incertain), action parmi [pose, danse, rire,
+interaction_machine, marche, discours, autre, indetermine], emotion parmi
+[sourire, rire, surprise, neutre, autre, indetermine], framing parmi
+[plan_large, plan_moyen, gros_plan, autre, indetermine], visible_facts (0 à 3
+phrases courtes limitées aux indices visibles) et description_confidence (0-100).
+
+Évalue aussi smile, reaction, energy et quality de 0 à 100. Barème : 0-39 faible,
+40-59 ordinaire, 60-74 bon, 75-89 excellent, 90-100 exceptionnel et rare.
+Propose duration de 2 à 10 secondes. Réponds uniquement en JSON avec : score,
+smile, reaction, energy, quality, duration, people_count, action, emotion,
+framing, visible_facts, description_confidence. N'ajoute aucun autre champ.
 """.strip(), [candidate_image])
 
     smile = clamp_score(data.get("smile"))
@@ -964,7 +1036,34 @@ quality, duration, description.
     )
     final_score = clamp_score(calculated_score)
 
+    people_count = int(max(-1, min(20, safe_float(data.get("people_count"), -1))))
+    action = normalize_choice(data.get("action"), {
+        "pose": "Pose", "danse": "Danse", "rire": "Rire",
+        "interaction_machine": "Interaction avec une machine",
+        "marche": "Marche", "discours": "Discours", "autre": "Autre",
+        "indetermine": "Indéterminée", "indéterminé": "Indéterminée",
+    }, "Indéterminée")
+    emotion = normalize_choice(data.get("emotion"), {
+        "sourire": "Sourire", "rire": "Rire", "surprise": "Surprise",
+        "neutre": "Neutre", "autre": "Autre", "indetermine": "Indéterminée",
+        "indéterminé": "Indéterminée",
+    }, "Indéterminée")
+    framing = normalize_choice(data.get("framing"), {
+        "plan_large": "Plan large", "plan_moyen": "Plan moyen",
+        "gros_plan": "Gros plan", "autre": "Autre",
+        "indetermine": "Indéterminé", "indéterminé": "Indéterminé",
+    }, "Indéterminé")
+    description_confidence = clamp_score(data.get("description_confidence"))
+    visible_facts = data.get("visible_facts") if description_confidence >= 70 else []
+    if description_confidence < 50:
+        people_count = -1
+        action = "Indéterminée"
+        emotion = "Indéterminée"
+        framing = "Indéterminé"
+
     machine = "Aucune"
+    confidence = 0
+    evidence = ""
     if final_score >= args.min_score and quality >= 35:
         machine_data = ollama_json_with_retry(args, f"""
 L'image 1 est une grille de cinq instants successifs d'un même passage, dans
@@ -991,6 +1090,10 @@ d'images du passage qui montrent réellement la machine.
         ):
             machine = "Aucune"
 
+    description = factual_description(
+        people_count, action, emotion, framing, visible_facts
+    )
+
     return {
         "score": final_score,
         "machine": machine,
@@ -998,8 +1101,15 @@ d'images du passage qui montrent réellement la machine.
         "reaction": reaction,
         "energy": energy,
         "quality": quality,
+        "people_count": people_count,
+        "action": action,
+        "emotion": emotion,
+        "framing": framing,
+        "description_confidence": description_confidence,
+        "machine_confidence": confidence if machine != "Aucune" else 0,
+        "machine_evidence": evidence[:300] if machine != "Aucune" else "",
         "duration": max(2.0, min(10.0, safe_float(data.get("duration"), 5.0))),
-        "description": str(data.get("description", "Moment événementiel"))[:300],
+        "description": description,
     }
 
 
@@ -1106,6 +1216,8 @@ def write_csv(rows: list[sqlite3.Row], destination: Path) -> None:
     fields = [
         "video_path", "start", "end", "start_timecode", "end_timecode",
         "score", "machine", "smile", "reaction", "energy", "quality",
+        "people_count", "action", "emotion", "framing",
+        "description_confidence", "machine_confidence", "machine_evidence",
         "description"
     ]
 
@@ -1126,6 +1238,13 @@ def write_csv(rows: list[sqlite3.Row], destination: Path) -> None:
                 "reaction": row["reaction"],
                 "energy": row["energy"],
                 "quality": row["quality"],
+                "people_count": row["people_count"],
+                "action": row["action"],
+                "emotion": row["emotion"],
+                "framing": row["framing"],
+                "description_confidence": row["description_confidence"],
+                "machine_confidence": row["machine_confidence"],
+                "machine_evidence": row["machine_evidence"],
                 "description": row["description"],
             })
 

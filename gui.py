@@ -132,8 +132,11 @@ class MontageAIApp(tk.Tk):
             "plus l'analyse est précise mais lente.  Moments/vidéo = extraits finalement gardés.\n"
             "Score minimum = sévérité de la sélection.  Réessayer les erreurs reprend les échecs "
             "sans toucher aux réussites.  Réanalyser ignore le cache et recalcule aussi les vidéos "
-            "terminées.  Cloud Ollama utilise Qwen3-VL sur les serveurs Ollama ; Local utilise "
-            "Gemma3 sur ce PC. Seules les grilles JPEG sont envoyées au cloud, jamais les vidéos."
+            "terminées. Cloud Ollama utilise Gemma 4 sur les serveurs Ollama ; Local utilise "
+            "Gemma3 sur ce PC. Seules les grilles JPEG sont envoyées au cloud, jamais les vidéos.\n"
+            "Le CSV détaille maintenant le nombre de personnes, l'action, l'expression, le cadrage, "
+            "la confiance de description et les preuves de reconnaissance de la machine. "
+            "Une valeur « Indéterminée » signifie que l'IA n'a pas assez d'indices visibles."
         )
         ttk.Label(help_frame, text=help_text, wraplength=910, justify="left").pack(fill="x")
 
