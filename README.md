@@ -9,7 +9,7 @@ Les vidéos originales ne sont jamais modifiées, déplacées ou supprimées.
 - indexation progressive des vidéos du NAS dans SQLite ;
 - reprise sans rescanner tout le NAS avec `--skip-index` ;
 - détection des changements de scène avec FFmpeg ;
-- extraction de cinq images distinctes par passage pour préserver les détails ;
+- extraction de cinq images par passage, regroupées en grille haute résolution ;
 - analyse des sourires, réactions, énergie et qualité ;
 - reconnaissance indépendante Photobooth, VogueBooth, 360Booth et MiroirBooth ;
 - cache SQLite des analyses pour accélérer les relances identiques ;
@@ -26,7 +26,7 @@ Installe une seule fois :
 1. Python 3 ;
 2. FFmpeg ;
 3. Ollama ;
-4. le modèle de vision `qwen2.5vl:7b`.
+4. le modèle de vision `gemma3`.
 
 ### Installer FFmpeg sous Windows
 
@@ -46,7 +46,7 @@ ffprobe -version
 ### Installer le modèle Ollama
 
 ```powershell
-ollama pull qwen2.5vl:7b
+ollama pull gemma3
 ```
 
 Vérifie les modèles installés :

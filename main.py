@@ -122,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     analysis_group.add_argument("--min-score", type=int, default=58)
 
     ai_group = parser.add_argument_group("Ollama")
-    ai_group.add_argument("--model", default="qwen2.5vl:7b")
+    ai_group.add_argument("--model", default="gemma3")
     ai_group.add_argument("--ollama-url", default="http://localhost:11434")
     ai_group.add_argument("--references", default="machine_references")
 
@@ -641,6 +641,38 @@ def extract_candidate_frames(
     return [path for path in destinations if path.exists()]
 
 
+def create_image_grid(
+    ffmpeg: str,
+    images: list[Path],
+    destination: Path,
+    columns: int = 3,
+) -> bool:
+    if not images:
+        return False
+    inputs: list[str] = []
+    filters: list[str] = []
+    positions: list[str] = []
+    for index, path in enumerate(images):
+        inputs.extend(["-i", str(path)])
+        filters.append(
+            f"[{index}:v]scale=512:384:force_original_aspect_ratio=decrease,"
+            f"pad=512:384:(ow-iw)/2:(oh-ih)/2[img{index}]"
+        )
+        positions.append(f"{(index % columns) * 512}_{(index // columns) * 384}")
+
+    labels = "".join(f"[img{index}]" for index in range(len(images)))
+    filter_complex = (
+        ";".join(filters)
+        + f";{labels}xstack=inputs={len(images)}:layout={'|'.join(positions)}[grid]"
+    )
+    result = run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[grid]", "-frames:v", "1", str(destination),
+    ], timeout=90)
+    return bool(result and result.returncode == 0 and destination.exists())
+
+
 def reference_images(folder: Path) -> list[ReferenceImage]:
     references: list[ReferenceImage] = []
 
@@ -703,7 +735,12 @@ def ollama_request(url: str, payload: dict, timeout: int = 180) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(
+            f"Ollama a refusé la requête (HTTP {exc.code}) : {detail}"
+        ) from exc
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Ollama ne répond pas correctement : {exc}") from exc
 
 
@@ -779,23 +816,25 @@ def ollama_json_with_retry(args: argparse.Namespace, prompt: str, images: list[s
     ) from last_error
 
 
-def analyze_frames(
+def analyze_grids(
     args: argparse.Namespace,
-    frames: list[Path],
+    candidate_grid: Path,
+    reference_grid: Path | None,
     references: list[ReferenceImage],
 ) -> dict:
-    frame_images = [image_base64(path) for path in frames]
+    candidate_image = image_base64(candidate_grid)
     reference_description = ", ".join(
         f"référence {index + 1} = {reference.machine}"
         for index, reference in enumerate(references[:4])
     ) or "aucune référence fournie"
-    machine_images = frame_images + [
-        image_base64(reference.path) for reference in references[:4]
-    ]
+    machine_images = [candidate_image]
+    if reference_grid is not None:
+        machine_images.append(image_base64(reference_grid))
 
     machine_data = ollama_json_with_retry(args, f"""
-Tu compares cinq images successives d'un même passage événementiel avec des
-photos de référence placées après elles. {reference_description}.
+L'image 1 est une grille de cinq instants successifs d'un même passage, dans
+l'ordre de lecture. L'image 2, si présente, est une grille de références dans
+l'ordre de lecture : {reference_description}.
 
 Identifie uniquement la machine réellement visible parmi Photobooth,
 VogueBooth, 360Booth, MiroirBooth ou Aucune. Une décoration, un téléphone, un
@@ -818,15 +857,16 @@ d'images du passage qui montrent réellement la machine.
         machine = "Aucune"
 
     data = ollama_json_with_retry(args, """
-Tu notes cinq images successives d'un passage événementiel. Décris seulement ce
-qui est directement visible. N'identifie aucune marque ni machine.
+Tu notes une grille montrant cinq instants successifs d'un passage événementiel.
+Décris seulement ce qui est directement visible. N'identifie aucune marque ni
+machine.
 
 Évalue séparément smile, reaction, energy et quality de 0 à 100. Barème global :
 0-39 faible ou inexploitable, 40-59 ordinaire, 60-74 bon, 75-89 excellent avec
 réaction évidente, 90-100 exceptionnel et rare. Propose une durée de 2 à 10
 secondes. Réponds uniquement en JSON avec : score, smile, reaction, energy,
 quality, duration, description.
-""".strip(), frame_images)
+""".strip(), [candidate_image])
 
     smile = clamp_score(data.get("smile"))
     reaction = clamp_score(data.get("reaction"))
@@ -895,8 +935,24 @@ def analyze_video(
             if len(frames) < 3:
                 continue
 
+            candidate_grid = work / f"{prefix}_grid.jpg"
+            if not create_image_grid(ffmpeg, frames, candidate_grid):
+                continue
+            reference_grid: Path | None = None
+            if references:
+                reference_grid = work / "machine_references_grid.jpg"
+                if not reference_grid.exists() and not create_image_grid(
+                    ffmpeg,
+                    [reference.path for reference in references[:4]],
+                    reference_grid,
+                    columns=2,
+                ):
+                    reference_grid = None
+
             try:
-                analysis = analyze_frames(args, frames, references)
+                analysis = analyze_grids(
+                    args, candidate_grid, reference_grid, references
+                )
                 database.save_cached_analysis(
                     str(path), timestamp, args.model, analysis
                 )

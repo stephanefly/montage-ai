@@ -27,7 +27,7 @@ class MontageAIApp(tk.Tk):
         self.source = tk.StringVar(value=r"P:\Montage-EVENT\ALL_MONTAGE")
         self.output = tk.StringVar(value=str(Path(__file__).parent / "resultats"))
         self.references = tk.StringVar(value=str(Path(__file__).parent / "machine_references"))
-        self.model = tk.StringVar(value="qwen2.5vl:7b")
+        self.model = tk.StringVar(value="gemma3")
         self.ollama_url = tk.StringVar(value="http://localhost:11434")
         self.max_index = tk.IntVar(value=5)
         self.max_videos = tk.IntVar(value=5)
