@@ -48,7 +48,7 @@ ffprobe -version
 
 ```powershell
 ollama signin
-ollama pull qwen3-vl:235b-cloud
+ollama pull gemma4:31b-cloud
 ```
 
 Le navigateur s'ouvre pour connecter le compte Ollama. Le modèle reste exécuté

@@ -159,7 +159,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.model:
         args.model = (
-            "qwen3-vl:235b-cloud" if args.provider == "cloud" else "gemma3"
+            "gemma4:31b-cloud" if args.provider == "cloud" else "gemma3"
         )
 
     if args.max_index < 0 or args.max_videos < 0:

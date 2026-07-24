@@ -28,7 +28,7 @@ class MontageAIApp(tk.Tk):
         self.output = tk.StringVar(value=str(Path(__file__).parent / "resultats"))
         self.references = tk.StringVar(value=str(Path(__file__).parent / "machine_references"))
         self.provider = tk.StringVar(value="Cloud Ollama (Free)")
-        self.model = tk.StringVar(value="qwen3-vl:235b-cloud")
+        self.model = tk.StringVar(value="gemma4:31b-cloud")
         self.ollama_url = tk.StringVar(value="http://localhost:11434")
         self.max_index = tk.IntVar(value=5)
         self.max_videos = tk.IntVar(value=5)
@@ -188,7 +188,7 @@ class MontageAIApp(tk.Tk):
 
     def _provider_changed(self, _event=None) -> None:
         if self.provider.get().startswith("Cloud"):
-            self.model.set("qwen3-vl:235b-cloud")
+            self.model.set("gemma4:31b-cloud")
             self.status.set("Cloud Ollama Free : vérifie que 'ollama signin' a été exécuté.")
         else:
             self.model.set("gemma3")
