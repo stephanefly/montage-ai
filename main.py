@@ -647,6 +647,31 @@ def ollama_request(url: str, payload: dict, timeout: int = 180) -> dict:
         raise RuntimeError(f"Ollama ne répond pas correctement : {exc}") from exc
 
 
+def parse_ollama_json(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError("Ollama a renvoyé une réponse d'analyse vide.")
+
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1).strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        preview = raw[:200].replace("\n", " ")
+        raise RuntimeError(
+            f"Ollama a renvoyé un JSON d'analyse invalide : {preview!r}"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Ollama a renvoyé un JSON qui n'est pas un objet.")
+    return data
+
+
 def normalize_machine(value: object) -> str:
     text = str(value or "").strip().lower()
     aliases = {
@@ -714,12 +739,23 @@ La description doit être courte et factuelle.
         "options": {"temperature": 0.1},
     }
 
-    response = ollama_request(
-        f"{args.ollama_url.rstrip('/')}/api/generate",
-        payload,
-    )
-    raw = response.get("response", "{}")
-    data = raw if isinstance(raw, dict) else json.loads(raw)
+    last_error: RuntimeError | None = None
+    for attempt in range(1, 3):
+        try:
+            response = ollama_request(
+                f"{args.ollama_url.rstrip('/')}/api/generate",
+                payload,
+            )
+            data = parse_ollama_json(response.get("response"))
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1)
+    else:
+        raise RuntimeError(
+            f"Analyse Ollama impossible après 2 tentatives : {last_error}"
+        ) from last_error
 
     smile = clamp_score(data.get("smile"))
     reaction = clamp_score(data.get("reaction"))
@@ -770,13 +806,21 @@ def analyze_video(
         args.candidates,
     )
     results: list[dict] = []
+    analysis_errors: list[str] = []
+    analyzed_candidates = 0
 
     for index, timestamp in enumerate(candidates, start=1):
         sheet = work / f"{abs(hash(str(path))) % 10**10}_{index}.jpg"
         if not extract_contact_sheet(ffmpeg, path, timestamp, duration, sheet):
             continue
 
-        analysis = analyze_sheet(args, sheet, references)
+        try:
+            analysis = analyze_sheet(args, sheet, references)
+            analyzed_candidates += 1
+        except RuntimeError as exc:
+            analysis_errors.append(str(exc))
+            print(f"    AVERTISSEMENT : candidat {index} ignoré ({exc})")
+            continue
         if analysis["score"] < args.min_score or analysis["quality"] < 35:
             continue
 
@@ -789,6 +833,12 @@ def analyze_video(
             "start": start,
             "end": end,
         })
+
+    if analysis_errors and analyzed_candidates == 0:
+        raise RuntimeError(
+            "Tous les candidats ont échoué pendant l'analyse Ollama. "
+            f"Dernière erreur : {analysis_errors[-1]}"
+        )
 
     selected: list[dict] = []
     for item in sorted(results, key=lambda value: value["score"], reverse=True):
