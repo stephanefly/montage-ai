@@ -94,6 +94,13 @@ Ou lance directement :
 python main.py --max-index 5 --max-videos 5 --candidates 3 --top-moments 2
 ```
 
+Pour vider l'index SQLite et toutes les anciennes analyses avant de rescanner le
+dossier sélectionné (sans supprimer les vidéos originales) :
+
+```powershell
+python main.py "P:\Montage-EVENT\ALL_MONTAGE" --reset-index --index-only
+```
+
 Cette commande :
 
 1. indexe seulement 5 fichiers ;

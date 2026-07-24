@@ -93,6 +93,11 @@ def parse_args() -> argparse.Namespace:
         help="Indexe les vidéos puis s'arrête avant l'analyse."
     )
     index_group.add_argument(
+        "--reset-index",
+        action="store_true",
+        help="Vide l'index SQLite et les analyses avant de rescanner le dossier."
+    )
+    index_group.add_argument(
         "--max-index",
         type=int,
         default=0,
@@ -172,6 +177,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--min-score doit être compris entre 0 et 100.")
     if args.top_limit < 1:
         parser.error("--top-limit doit être supérieur ou égal à 1.")
+    if args.reset_index and args.skip_index:
+        parser.error("--reset-index est incompatible avec --skip-index.")
 
     return args
 
@@ -472,6 +479,21 @@ class Database:
     def has_videos(self) -> bool:
         row = self.connection.execute("SELECT 1 FROM videos LIMIT 1").fetchone()
         return row is not None
+
+    def reset_index(self) -> None:
+        """Supprime uniquement l'index et les résultats, jamais les vidéos sources."""
+        try:
+            self.connection.execute("BEGIN")
+            self.connection.execute("DELETE FROM moments")
+            self.connection.execute("DELETE FROM analysis_cache")
+            self.connection.execute("DELETE FROM videos")
+            self.connection.execute(
+                "DELETE FROM sqlite_sequence WHERE name='moments'"
+            )
+            self.connection.commit()
+        except sqlite3.Error:
+            self.connection.rollback()
+            raise
 
     def invalidate_outdated_analyses(self, model: str) -> int:
         condition = """
@@ -1380,6 +1402,11 @@ def main() -> int:
     database = Database(database_path)
 
     try:
+        if args.reset_index:
+            database.reset_index()
+            print("Indexation réinitialisée : index et analyses supprimés.")
+            print("Les fichiers vidéo originaux n'ont pas été modifiés.")
+
         invalidated = database.invalidate_outdated_analyses(args.model)
         if invalidated:
             print(

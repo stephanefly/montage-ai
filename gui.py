@@ -36,6 +36,7 @@ class MontageAIApp(tk.Tk):
         self.top_moments = tk.IntVar(value=2)
         self.min_score = tk.IntVar(value=58)
         self.skip_index = tk.BooleanVar(value=False)
+        self.reset_index = tk.BooleanVar(value=False)
         self.retry_errors = tk.BooleanVar(value=False)
         self.reanalyze = tk.BooleanVar(value=False)
         self.keep_work = tk.BooleanVar(value=False)
@@ -101,6 +102,11 @@ class MontageAIApp(tk.Tk):
             text="Réanalyser sans utiliser le cache",
             variable=self.reanalyze,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Réinitialiser complètement l'indexation",
+            variable=self.reset_index,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         presets = ttk.Frame(settings)
         presets.grid(row=3, column=3, columnspan=3, sticky="e", pady=(6, 0))
@@ -115,14 +121,14 @@ class MontageAIApp(tk.Tk):
             presets, text="Qualité", command=lambda: self._apply_preset("quality")
         ).pack(side="left", padx=2)
 
-        ttk.Label(settings, text="Modèle").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(settings, text="Modèle").grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(settings, textvariable=self.model).grid(
-            row=4, column=1, columnspan=3, sticky="ew", padx=3, pady=(8, 0)
+            row=5, column=1, columnspan=3, sticky="ew", padx=3, pady=(8, 0)
         )
         ttk.Label(
             settings,
             text="Cloud Free : connexion Ollama obligatoire",
-        ).grid(row=4, column=4, columnspan=2, sticky="e", pady=(8, 0))
+        ).grid(row=5, column=4, columnspan=2, sticky="e", pady=(8, 0))
 
         help_frame = ttk.LabelFrame(outer, text="À quoi servent les réglages ?", padding=9)
         help_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -132,7 +138,9 @@ class MontageAIApp(tk.Tk):
             "plus l'analyse est précise mais lente.  Moments/vidéo = extraits finalement gardés.\n"
             "Score minimum = sévérité de la sélection.  Réessayer les erreurs reprend les échecs "
             "sans toucher aux réussites.  Réanalyser ignore le cache et recalcule aussi les vidéos "
-            "terminées. Cloud Ollama utilise Gemma 4 sur les serveurs Ollama ; Local utilise "
+            "terminées. Réinitialiser vide l'index et les analyses, puis rescannera le dossier choisi "
+            "sans supprimer les vidéos originales. "
+            "Cloud Ollama utilise Gemma 4 sur les serveurs Ollama ; Local utilise "
             "Gemma3 sur ce PC. Seules les grilles JPEG sont envoyées au cloud, jamais les vidéos.\n"
             "Le CSV détaille maintenant le nombre de personnes, l'action, l'expression, le cadrage, "
             "la confiance de description et les preuves de reconnaissance de la machine. "
@@ -228,6 +236,8 @@ class MontageAIApp(tk.Tk):
         ]
         if self.skip_index.get():
             command.append("--skip-index")
+        if self.reset_index.get():
+            command.append("--reset-index")
         if self.retry_errors.get():
             command.append("--retry-errors")
         if self.reanalyze.get():
@@ -242,6 +252,20 @@ class MontageAIApp(tk.Tk):
         if not self.source.get().strip() or not self.output.get().strip():
             messagebox.showerror("Montage AI", "Les dossiers vidéos et résultats sont obligatoires.")
             return
+        if self.reset_index.get():
+            if self.skip_index.get():
+                messagebox.showerror(
+                    "Montage AI",
+                    "Décochez « Ignorer l'indexation » pour réinitialiser l'index.",
+                )
+                return
+            confirmed = messagebox.askyesno(
+                "Réinitialiser l'indexation",
+                "Vider l'index SQLite et toutes les analyses enregistrées ?\n\n"
+                "Les vidéos originales ne seront pas supprimées.",
+            )
+            if not confirmed:
+                return
 
         self._append("\n=== Nouvelle analyse ===\n")
         self.start_button.configure(state="disabled")
