@@ -24,7 +24,7 @@ Installe une seule fois :
 1. Python 3 ;
 2. FFmpeg ;
 3. Ollama ;
-4. le modèle de vision `gemma3`.
+4. le modèle de vision `qwen2.5vl:7b`.
 
 ### Installer FFmpeg sous Windows
 
@@ -44,7 +44,7 @@ ffprobe -version
 ### Installer le modèle Ollama
 
 ```powershell
-ollama pull gemma3
+ollama pull qwen2.5vl:7b
 ```
 
 Vérifie les modèles installés :

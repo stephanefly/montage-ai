@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     analysis_group.add_argument("--min-score", type=int, default=58)
 
     ai_group = parser.add_argument_group("Ollama")
-    ai_group.add_argument("--model", default="gemma3")
+    ai_group.add_argument("--model", default="qwen2.5vl:7b")
     ai_group.add_argument("--ollama-url", default="http://localhost:11434")
     ai_group.add_argument("--references", default="machine_references")
 
@@ -717,11 +717,27 @@ Références éventuelles : {reference_description}.
 
 Identifie la machine principale visible parmi exactement :
 Photobooth, VogueBooth, 360Booth, MiroirBooth ou Aucune.
-Ne confonds pas une simple décoration avec une machine.
+Une machine ne peut être retenue que si sa structure est réellement visible dans
+l'image 1 et correspond à une référence. Le thème de la soirée, un mur décoré,
+des lumières, un téléphone, un miroir ordinaire ou la présence d'invités ne sont
+jamais des preuves suffisantes. N'infère rien hors champ.
+Si la machine est partiellement cachée, ambiguë ou absente, réponds Aucune.
+Donne machine_confidence entre 0 et 100 et visible_evidence, une preuve visuelle
+précise et directement observable. Pour Aucune, visible_evidence explique
+brièvement qu'aucune structure identifiable n'est visible.
+
+Barème strict du score global :
+- 0 à 39 : passage faible, flou, vide ou sans réaction nette ;
+- 40 à 59 : passage ordinaire ;
+- 60 à 74 : bon passage clairement exploitable ;
+- 75 à 89 : excellent passage avec réaction évidente ;
+- 90 à 100 : exceptionnel et rare.
+N'attribue jamais une note à partir d'un élément supposé ou invisible.
 Propose une durée d'extrait entre 2 et 10 secondes.
 
 Réponds uniquement en JSON valide avec les clés :
-score, machine, smile, reaction, energy, quality, duration, description.
+score, machine, machine_confidence, visible_evidence, smile, reaction, energy,
+quality, duration, description.
 Toutes les notes sont des nombres de 0 à 100.
 La description doit être courte et factuelle.
 """.strip()
@@ -763,6 +779,12 @@ La description doit être courte et factuelle.
     quality = clamp_score(data.get("quality"))
     ai_score = clamp_score(data.get("score"))
     machine = normalize_machine(data.get("machine"))
+    machine_confidence = clamp_score(data.get("machine_confidence"))
+    visible_evidence = str(data.get("visible_evidence", "")).strip()
+    if machine != "Aucune" and (
+        machine_confidence < 75 or len(visible_evidence) < 8
+    ):
+        machine = "Aucune"
 
     calculated_score = round(
         ai_score * 0.15
