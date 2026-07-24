@@ -40,6 +40,7 @@ class MontageAIApp(tk.Tk):
         self.retry_errors = tk.BooleanVar(value=False)
         self.reanalyze = tk.BooleanVar(value=False)
         self.keep_work = tk.BooleanVar(value=False)
+        self.search_query = tk.StringVar()
         self.status = tk.StringVar(value="Prêt")
 
         self._build_ui()
@@ -50,7 +51,7 @@ class MontageAIApp(tk.Tk):
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(3, weight=1)
+        outer.rowconfigure(4, weight=1)
 
         paths = ttk.LabelFrame(outer, text="Dossiers", padding=10)
         paths.grid(row=0, column=0, sticky="ew")
@@ -148,8 +149,27 @@ class MontageAIApp(tk.Tk):
         )
         ttk.Label(help_frame, text=help_text, wraplength=910, justify="left").pack(fill="x")
 
+        search_frame = ttk.LabelFrame(outer, text="Retrouver des rushs avec une phrase", padding=9)
+        search_frame.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        search_frame.columnconfigure(0, weight=1)
+        ttk.Entry(
+            search_frame,
+            textvariable=self.search_query,
+            font=("Segoe UI", 11),
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.search_button = ttk.Button(
+            search_frame,
+            text="Rechercher dans l'index",
+            command=self._search,
+        )
+        self.search_button.grid(row=0, column=1)
+        ttk.Label(
+            search_frame,
+            text="Exemple : des gens au Photobooth qui rigolent beaucoup",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+
         console_frame = ttk.LabelFrame(outer, text="Journal", padding=8)
-        console_frame.grid(row=3, column=0, sticky="nsew")
+        console_frame.grid(row=4, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(
@@ -167,7 +187,7 @@ class MontageAIApp(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky="ns")
 
         actions = ttk.Frame(outer)
-        actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        actions.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         actions.columnconfigure(1, weight=1)
         self.start_button = ttk.Button(actions, text="Lancer", command=self._start)
         self.stop_button = ttk.Button(actions, text="Arrêter", command=self._stop, state="disabled")
@@ -272,13 +292,34 @@ class MontageAIApp(tk.Tk):
         self.stop_button.configure(state="normal")
         self.progress.start(12)
         self.status.set("Analyse en cours…")
-        threading.Thread(target=self._run_process, daemon=True).start()
+        threading.Thread(target=self._run_process, args=(self._command(),), daemon=True).start()
 
-    def _run_process(self) -> None:
+    def _search(self) -> None:
+        if self.process is not None:
+            return
+        query = self.search_query.get().strip()
+        if not query:
+            messagebox.showerror("Montage AI", "Écrivez la phrase décrivant le rush recherché.")
+            return
+        command = [
+            sys.executable, "-u", str(Path(__file__).with_name("main.py")),
+            "--output", self.output.get().strip(), "--export-only",
+            "--search", query, "--search-limit", "30",
+            "--model", self.model.get().strip(),
+        ]
+        self._append(f"\n=== Recherche : {query} ===\n")
+        self.start_button.configure(state="disabled")
+        self.search_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        self.progress.start(12)
+        self.status.set("Recherche dans l'index…")
+        threading.Thread(target=self._run_process, args=(command,), daemon=True).start()
+
+    def _run_process(self, command: list[str]) -> None:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             self.process = subprocess.Popen(
-                self._command(),
+                command,
                 cwd=Path(__file__).parent,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -326,6 +367,7 @@ class MontageAIApp(tk.Tk):
         self.process = None
         self.progress.stop()
         self.start_button.configure(state="normal")
+        self.search_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.status.set("Terminé" if return_code == 0 else f"Arrêté avec le code {return_code}")
 

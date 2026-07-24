@@ -26,6 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -156,6 +157,17 @@ def parse_args() -> argparse.Namespace:
         help="Nombre de moments dans le fichier Top."
     )
     export_group.add_argument(
+        "--search",
+        default="",
+        help="Recherche des rushs avec une phrase en langage naturel."
+    )
+    export_group.add_argument(
+        "--search-limit",
+        type=int,
+        default=30,
+        help="Nombre maximal de résultats pour la recherche."
+    )
+    export_group.add_argument(
         "--keep-work",
         action="store_true",
         help="Conserve les planches d'images temporaires."
@@ -177,6 +189,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--min-score doit être compris entre 0 et 100.")
     if args.top_limit < 1:
         parser.error("--top-limit doit être supérieur ou égal à 1.")
+    if args.search_limit < 1:
+        parser.error("--search-limit doit être supérieur ou égal à 1.")
     if args.reset_index and args.skip_index:
         parser.error("--reset-index est incompatible avec --skip-index.")
 
@@ -1271,6 +1285,101 @@ def write_csv(rows: list[sqlite3.Row], destination: Path) -> None:
             })
 
 
+def normalized_text(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "").lower())
+    return "".join(character for character in text if not unicodedata.combining(character))
+
+
+def search_moments(
+    rows: list[sqlite3.Row],
+    query: str,
+    limit: int,
+) -> list[tuple[sqlite3.Row, int]]:
+    """Classe les moments selon une demande française, sans nouvel appel IA."""
+    text = normalized_text(query)
+    tokens = {
+        token for token in re.findall(r"[a-z0-9]+", text)
+        if len(token) >= 3 and token not in {
+            "avec", "dans", "pour", "une", "des", "les", "qui", "aux",
+            "sur", "video", "rush", "veux", "voudrais",
+        }
+    }
+    requested_machine = next((
+        machine for terms, machine in (
+            (("photobooth", "photo booth", "borne photo"), "Photobooth"),
+            (("voguebooth", "vogue booth"), "VogueBooth"),
+            (("360booth", "360 booth", "plateforme 360"), "360Booth"),
+            (("miroirbooth", "miroir booth", "miroir magique"), "MiroirBooth"),
+        ) if any(term in text for term in terms)
+    ), None)
+    wants_laugh = any(word in text for word in ("rire", "rigol", "amus", "eclat de rire"))
+    wants_smile = "sourir" in text
+    wants_people = any(word in text for word in ("gens", "personnes", "groupe", "invites"))
+    action_terms = {
+        "danse": "danse", "dansent": "danse", "poser": "pose", "posent": "pose",
+        "marche": "marche", "discours": "discours", "parle": "discours",
+    }
+    requested_actions = {
+        action for term, action in action_terms.items() if term in text
+    }
+
+    matches: list[tuple[sqlite3.Row, int]] = []
+    for row in rows:
+        if requested_machine and row["machine"] != requested_machine:
+            continue
+        relevance = safe_float(row["quality"]) * 0.10 + safe_float(row["score"]) * 0.05
+        if requested_machine:
+            relevance += 35 + safe_float(row["machine_confidence"]) * 0.15
+        if wants_people:
+            relevance += 15 if int(row["people_count"]) >= 2 else -10
+        if wants_laugh:
+            relevance += safe_float(row["reaction"]) * 0.22
+            relevance += safe_float(row["smile"]) * 0.18
+            relevance += 25 if "rire" in normalized_text(row["emotion"]) else 0
+        elif wants_smile:
+            relevance += safe_float(row["smile"]) * 0.35
+        if requested_actions:
+            relevance += 25 if any(
+                action in normalized_text(row["action"])
+                for action in requested_actions
+            ) else -10
+        searchable = normalized_text(" ".join(str(row[field]) for field in (
+            "machine", "action", "emotion", "framing", "description", "machine_evidence"
+        )))
+        relevance += min(18, sum(3 for token in tokens if token in searchable))
+        matches.append((row, clamp_score(relevance)))
+
+    matches.sort(key=lambda item: (item[1], item[0]["score"]), reverse=True)
+    return matches[:limit]
+
+
+def write_search_csv(
+    matches: list[tuple[sqlite3.Row, int]],
+    destination: Path,
+    query: str,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "relevance", "search_query", "video_path", "start", "end",
+        "start_timecode", "end_timecode", "machine", "people_count", "action",
+        "emotion", "smile", "reaction", "energy", "quality", "description",
+    ]
+    with destination.open("w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for row, relevance in matches:
+            writer.writerow({
+                "relevance": relevance, "search_query": query,
+                "video_path": row["video_path"], "start": round(row["start"], 3),
+                "end": round(row["end"], 3), "start_timecode": timecode(row["start"]),
+                "end_timecode": timecode(row["end"]), "machine": row["machine"],
+                "people_count": row["people_count"], "action": row["action"],
+                "emotion": row["emotion"], "smile": row["smile"],
+                "reaction": row["reaction"], "energy": row["energy"],
+                "quality": row["quality"], "description": row["description"],
+            })
+
+
 def jsx_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -1375,10 +1484,25 @@ def export_results(
     generate_after_effects(all_rows, jsx_file, args.event_name)
     print_top(top_rows, args.top_machine)
 
+    search_file: Path | None = None
+    if args.search.strip():
+        matches = search_moments(all_rows, args.search.strip(), args.search_limit)
+        search_file = output / "recherche_rushs.csv"
+        write_search_csv(matches, search_file, args.search.strip())
+        print(f"\nRecherche : {args.search.strip()}")
+        print(f"  {len(matches)} rush(s) correspondant(s), classé(s) par pertinence.")
+        for rank, (row, relevance) in enumerate(matches[:10], start=1):
+            print(
+                f"  {rank:>2}. Pertinence {relevance:>3} | "
+                f"{timecode(row['start'])} | {Path(row['video_path']).name}"
+            )
+
     print("\nExports :")
     print(f"  Tous les moments : {all_csv}")
     print(f"  Top {args.top_limit} {args.top_machine} : {top_csv}")
     print(f"  After Effects : {jsx_file}")
+    if search_file is not None:
+        print(f"  Résultats de recherche : {search_file}")
 
 
 def print_database_status(database: Database) -> None:

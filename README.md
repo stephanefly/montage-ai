@@ -101,6 +101,20 @@ dossier sélectionné (sans supprimer les vidéos originales) :
 python main.py "P:\Montage-EVENT\ALL_MONTAGE" --reset-index --index-only
 ```
 
+## Rechercher un rush avec une phrase
+
+Dans l'IHM, saisis par exemple **des gens au Photobooth qui rigolent beaucoup**
+dans la zone « Retrouver des rushs avec une phrase », puis clique sur
+« Rechercher dans l'index ». La recherche combine la machine, le nombre de
+personnes, l'action, l'expression, les sourires, les réactions et la qualité.
+Elle ne relance pas l'analyse vidéo et produit `resultats/recherche_rushs.csv`.
+
+La même recherche est disponible en ligne de commande :
+
+```powershell
+python main.py --output resultats --export-only --search "des gens au Photobooth qui rigolent beaucoup"
+```
+
 Cette commande :
 
 1. indexe seulement 5 fichiers ;
